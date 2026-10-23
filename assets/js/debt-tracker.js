@@ -46,11 +46,14 @@
     return Math.round((monthlyAmount * 12) / PAYS_PER_YEAR[frequency]);
   }
 
-  // Snowball: smallest balance first. Avalanche: highest interest first.
+  // "smallest": smallest balance first. "due": earliest due date first
+  // (debts with no due date go last).
   function orderDebts(debts, strategy) {
     return debts.slice().sort((a, b) => {
-      if (strategy === "avalanche" && (b.apr || 0) !== (a.apr || 0)) {
-        return (b.apr || 0) - (a.apr || 0);
+      if (strategy === "due" && (a.dueDate || "") !== (b.dueDate || "")) {
+        if (!a.dueDate) return 1;
+        if (!b.dueDate) return -1;
+        return a.dueDate < b.dueDate ? -1 : 1;
       }
       return a.balance - b.balance;
     });
@@ -93,7 +96,7 @@
     const debts = state.debts.map((d) => ({
       id: d.id,
       name: d.name,
-      apr: d.apr || 0,
+      dueDate: d.dueDate || "",
       minPayment: d.minPayment || 0,
       balance: remainingOn(state, d),
     }));
@@ -121,28 +124,21 @@
     };
   }
 
-  // Month-by-month simulation with monthly interest (APR / 12).
+  // Month-by-month simulation of the plan (no interest).
   function forecast(debts, budget, strategy) {
     let balances = debts
       .filter((d) => d.balance > 0)
       .map((d) => Object.assign({}, d));
     const payoffMonth = {};
-    let totalInterest = 0;
 
     if (balances.length === 0) {
-      return { months: 0, payoffMonth, totalInterest, possible: true };
+      return { months: 0, payoffMonth, possible: true };
     }
     if (budget <= 0) {
-      return { months: null, payoffMonth, totalInterest, possible: false };
+      return { months: null, payoffMonth, possible: false };
     }
 
     for (let month = 1; month <= MAX_MONTHS; month++) {
-      balances.forEach((d) => {
-        const interest = Math.round((d.balance * d.apr) / 1200);
-        d.balance += interest;
-        totalInterest += interest;
-      });
-
       const { allocation } = allocate(balances, budget, strategy);
       balances.forEach((d) => {
         d.balance -= allocation[d.id] || 0;
@@ -151,10 +147,10 @@
       balances = balances.filter((d) => d.balance > 0);
 
       if (balances.length === 0) {
-        return { months: month, payoffMonth, totalInterest, possible: true };
+        return { months: month, payoffMonth, possible: true };
       }
     }
-    return { months: null, payoffMonth, totalInterest, possible: false };
+    return { months: null, payoffMonth, possible: false };
   }
 
   function addMonths(date, months) {
@@ -223,7 +219,7 @@
       essentials: [],
       debts: [],
       payments: [],
-      plan: { strategy: "avalanche", bufferPercent: 10 },
+      plan: { strategy: "smallest", bufferPercent: 10 },
     };
   }
 
@@ -231,7 +227,11 @@
     try {
       const raw = root.localStorage.getItem(STORAGE_KEY);
       if (!raw) return emptyState();
-      return Object.assign(emptyState(), JSON.parse(raw));
+      const loaded = Object.assign(emptyState(), JSON.parse(raw));
+      if (!["smallest", "due"].includes(loaded.plan.strategy)) {
+        loaded.plan.strategy = "smallest";
+      }
+      return loaded;
     } catch (e) {
       return emptyState();
     }
@@ -351,7 +351,6 @@
           : 0;
         const done = left === 0;
         const details = [
-          d.apr ? `${d.apr}% interest` : "",
           d.minPayment ? `min ${fmt(d.minPayment)}/month` : "",
           d.dueDate ? `due ${fmtDate(parseDate(d.dueDate))}` : "",
         ]
@@ -686,12 +685,10 @@
           <p class="text-2xl font-bold text-primary">${planMonth(f.months)}</p>
           <p class="text-sm text-body-color">${f.months} month${
         f.months === 1 ? "" : "s"
-      }${
-        f.totalInterest ? ` · about ${fmt(f.totalInterest)} in interest` : ""
       }</p>
         </div>`;
     } else if (!f.possible) {
-      html += `<p class="mt-6 rounded-lg bg-red-50 p-4 text-sm text-red-700">At this budget the debts won't be cleared within 50 years, because the interest is growing faster than you're paying it off. Try a smaller savings buffer or fewer essentials, or get free advice.</p>`;
+      html += `<p class="mt-6 rounded-lg bg-red-50 p-4 text-sm text-red-700">At this budget the debts won't be cleared, because there's nothing left for them after essentials and savings. Try a smaller savings buffer or fewer essentials, or get free advice.</p>`;
     }
 
     if (plan.unused > 0) {
@@ -722,11 +719,9 @@
       return;
     }
     const minPayment = toPence($("debt-min").value);
-    const apr = parseFloat($("debt-apr").value);
     const fields = {
       name,
       amount,
-      apr: Number.isFinite(apr) && apr > 0 ? apr : 0,
       minPayment: minPayment > 0 ? minPayment : 0,
       dueDate: $("debt-due").value,
       notes: $("debt-notes").value.trim(),
@@ -854,7 +849,6 @@
         $("debt-id").value = d.id;
         $("debt-name").value = d.name;
         $("debt-amount").value = (d.amount / 100).toFixed(2);
-        $("debt-apr").value = d.apr || "";
         $("debt-min").value = d.minPayment
           ? (d.minPayment / 100).toFixed(2)
           : "";
