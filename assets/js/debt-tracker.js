@@ -410,6 +410,7 @@
     } catch (e) {
       storageWorks = false;
     }
+    pushToCloud();
   }
 
   function newId() {
@@ -480,7 +481,10 @@
     renderPayForm();
     renderEssentials();
     renderPlan();
-    $("storage-warning").classList.toggle("hidden", storageWorks);
+    $("storage-warning").classList.toggle(
+      "hidden",
+      storageWorks || Boolean(cloudDoc)
+    );
   }
 
   function renderPayday() {
@@ -1407,19 +1411,25 @@
       }
       case "delete-debt": {
         const d = state.debts.find((x) => x.id === id);
-        if (!confirm(`Delete ${d.name} and all its payments?`)) return;
-        state.debts = state.debts.filter((x) => x.id !== id);
-        state.payments = state.payments.filter((p) => p.debtId !== id);
-        if ($("debt-id").value === id) resetDebtForm();
-        saveState();
-        render();
+        askConfirm(`Delete ${d.name} and all its payments?`, "Delete").then(
+          (ok) => {
+            if (!ok) return;
+            state.debts = state.debts.filter((x) => x.id !== id);
+            state.payments = state.payments.filter((p) => p.debtId !== id);
+            if ($("debt-id").value === id) resetDebtForm();
+            saveState();
+            render();
+          }
+        );
         break;
       }
       case "delete-payment": {
-        if (!confirm("Undo this payment?")) return;
-        state.payments = state.payments.filter((p) => p.id !== id);
-        saveState();
-        render();
+        askConfirm("Undo this payment?", "Undo payment").then((ok) => {
+          if (!ok) return;
+          state.payments = state.payments.filter((p) => p.id !== id);
+          saveState();
+          render();
+        });
         break;
       }
       case "payday-paid": {
@@ -1439,12 +1449,129 @@
     }
   });
 
+  // ===== Confirm dialog =====
+  // In-page rather than window.confirm(), which the online viewer blocks.
+
+  function askConfirm(message, okLabel) {
+    return new Promise((resolve) => {
+      const dialog = $("confirm-dialog");
+      $("confirm-message").textContent = message;
+      $("confirm-ok").textContent = okLabel;
+      dialog.classList.remove("hidden");
+      $("confirm-cancel").focus();
+      const close = (ok) => {
+        dialog.classList.add("hidden");
+        $("confirm-ok").onclick = $("confirm-cancel").onclick = null;
+        document.removeEventListener("keydown", onKey);
+        resolve(ok);
+      };
+      const onKey = (e) => {
+        if (e.key === "Escape") close(false);
+      };
+      $("confirm-ok").onclick = () => close(true);
+      $("confirm-cancel").onclick = () => close(false);
+      document.addEventListener("keydown", onKey);
+    });
+  }
+
+  // ===== Sync (online version only) =====
+  // Opened as a claude.ai artifact, the tracker also keeps its data in the
+  // viewer's private store, so every device they sign in on sees the same
+  // debts. Elsewhere (the downloaded file) this stays off.
+
+  let cloudDoc = null;
+  let cloudJson = null;
+  let cloudTimer = null;
+  let cloudWrite = Promise.resolve();
+
+  function setSyncStatus(text) {
+    $("sync-status").textContent = text;
+  }
+
+  function pushToCloud() {
+    if (!cloudDoc) return;
+    clearTimeout(cloudTimer);
+    // Coalesce bursts of edits into one write, one write at a time.
+    cloudTimer = setTimeout(() => {
+      const json = JSON.stringify(state);
+      if (json === cloudJson) return;
+      cloudJson = json;
+      setSyncStatus("Saving to your account…");
+      cloudWrite = cloudWrite
+        .then(() => cloudDoc.set({ json, savedAt: new Date().toISOString() }))
+        .then(
+          () => setSyncStatus("Synced to your Claude account"),
+          () => setSyncStatus("Couldn't sync. Changes are kept on this device.")
+        );
+    }, 600);
+  }
+
+  function applyRemote(json) {
+    if (typeof json !== "string" || json === cloudJson) return;
+    try {
+      const data = JSON.parse(json);
+      cloudJson = json;
+      state = Object.assign(emptyState(), data);
+      root.localStorage.setItem(STORAGE_KEY, json);
+    } catch (e) {
+      // Keep what's on screen if the stored copy can't be read.
+    }
+    render();
+  }
+
+  async function connectCloud() {
+    if (!root.claude || typeof root.claude.use !== "function") return;
+    const [db, user] = await Promise.all([
+      root.claude.use("db"),
+      root.claude.use("user"),
+    ]);
+    const id = user ? await user.id() : null;
+    if (!db || !id) {
+      setSyncStatus("Sign in to Claude to sync between devices.");
+      return;
+    }
+    const ref = db.doc(`data/users/${id}/tracker`);
+    let snap;
+    try {
+      snap = await ref.get();
+    } catch (e) {
+      setSyncStatus("Couldn't reach your account. Saved on this device.");
+      return;
+    }
+    cloudDoc = ref;
+    const hasLocalData =
+      state.debts.length || state.payments.length || state.pay.amount;
+    if (snap.exists) applyRemote(snap.data().json);
+    else if (hasLocalData) pushToCloud();
+    setSyncStatus("Synced to your Claude account");
+    ref.onSnapshot(
+      (s) => {
+        if (s.exists && !s.metadata.hasPendingWrites)
+          applyRemote(s.data().json);
+      },
+      () => setSyncStatus("Sync stopped. Reload the page to reconnect.")
+    );
+    render();
+  }
+
   // ===== Backup =====
 
-  $("export-btn").addEventListener("click", () => {
-    const blob = new Blob([JSON.stringify(state, null, 2)], {
-      type: "application/json",
-    });
+  $("export-btn").addEventListener("click", async () => {
+    const json = JSON.stringify(state, null, 2);
+    const filename = `debt-tracker-backup-${todayIso()}.json`;
+    const downloads =
+      root.claude && typeof root.claude.use === "function"
+        ? await root.claude.use("downloads")
+        : null;
+    if (downloads) {
+      downloads.save({ filename, data: json }).catch((e) => {
+        if (e && e.code !== "declined") {
+          flash("The backup couldn't be saved here.", true);
+        }
+      });
+      return;
+    }
+    const blob = new Blob([json], { type: "application/json" });
     const a = document.createElement("a");
     a.href = URL.createObjectURL(blob);
     a.download = `debt-tracker-backup-${todayIso()}.json`;
@@ -1462,12 +1589,16 @@
         if (!Array.isArray(data.debts) || !Array.isArray(data.payments)) {
           throw new Error("bad file");
         }
-        if (!confirm("Replace everything in the tracker with this backup?"))
-          return;
-        state = Object.assign(emptyState(), data);
-        saveState();
-        render();
-        flash("Backup restored.");
+        askConfirm(
+          "Replace everything in the tracker with this backup?",
+          "Replace"
+        ).then((ok) => {
+          if (!ok) return;
+          state = Object.assign(emptyState(), data);
+          saveState();
+          render();
+          flash("Backup restored.");
+        });
       } catch (err) {
         flash("That file isn't a debt tracker backup.", true);
       } finally {
@@ -1477,13 +1608,12 @@
     reader.readAsText(file);
   });
 
-  $("reset-btn").addEventListener("click", () => {
-    if (
-      !confirm(
-        "Delete ALL debts, payments and budget settings? This can't be undone."
-      )
-    )
-      return;
+  $("reset-btn").addEventListener("click", async () => {
+    const ok = await askConfirm(
+      "Delete ALL debts, payments and budget settings? This can't be undone.",
+      "Delete everything"
+    );
+    if (!ok) return;
     state = emptyState();
     saveState();
     resetDebtForm();
@@ -1493,4 +1623,5 @@
 
   renderScheduleForm();
   render();
+  connectCloud();
 })(typeof window !== "undefined" ? window : globalThis);
