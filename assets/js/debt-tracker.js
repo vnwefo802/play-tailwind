@@ -59,7 +59,7 @@
     });
   }
 
-  // Minimum payments first, then everything left goes to the top debt.
+  // Money goes to the top debt in the order until it's cleared, then the next.
   function allocate(debts, budget, strategy) {
     const ordered = orderDebts(
       debts.filter((d) => d.balance > 0),
@@ -69,14 +69,8 @@
     let left = budget;
 
     ordered.forEach((d) => {
-      const pay = Math.min(d.minPayment || 0, d.balance, left);
+      const pay = Math.min(d.balance, left);
       result[d.id] = pay;
-      left -= pay;
-    });
-
-    ordered.forEach((d) => {
-      const pay = Math.min(d.balance - result[d.id], left);
-      result[d.id] += pay;
       left -= pay;
     });
 
@@ -97,15 +91,10 @@
       id: d.id,
       name: d.name,
       dueDate: d.dueDate || "",
-      minPayment: d.minPayment || 0,
       balance: remainingOn(state, d),
     }));
 
     const { allocation, unused } = allocate(debts, debtBudget, plan.strategy);
-    const minimumsTotal = sum(
-      debts.filter((d) => d.balance > 0),
-      (d) => Math.min(d.minPayment, d.balance)
-    );
 
     return {
       monthlyIncome,
@@ -115,7 +104,6 @@
       debtBudget,
       allocation,
       unused,
-      minimumsShortfall: Math.max(minimumsTotal - debtBudget, 0),
       order: orderDebts(
         debts.filter((d) => d.balance > 0),
         plan.strategy
@@ -351,7 +339,6 @@
           : 0;
         const done = left === 0;
         const details = [
-          d.minPayment ? `min ${fmt(d.minPayment)}/month` : "",
           d.dueDate ? `due ${fmtDate(parseDate(d.dueDate))}` : "",
         ]
           .filter(Boolean)
@@ -455,6 +442,14 @@
           <td class="py-2 pr-3 text-dark">${esc(
             names[p.debtId] || "Deleted debt"
           )}${
+          p.clearedDueDate
+            ? ` <span class="ml-1 whitespace-nowrap rounded-full bg-secondary px-2 py-0.5 text-xs font-medium text-white">${
+                p.clearedDueDate < p.date
+                  ? "Paid off overdue"
+                  : "Paid on due date"
+              }</span>`
+            : ""
+        }${
           p.note
             ? `<span class="block text-xs text-body-color">${esc(
                 p.note
@@ -481,7 +476,7 @@
       .sort((a, b) => a.days - b.days);
 
     if (items.length === 0) {
-      list.innerHTML = `<li class="text-body-color">No due dates set. Add one when you add or edit a debt.</li>`;
+      list.innerHTML = `<li class="text-body-color">Nothing due. Add a due date when you add or edit a debt.</li>`;
       return;
     }
 
@@ -610,11 +605,6 @@
         -plan.leftover
       )} more than you take home each month. Check the essentials list, or speak to a free debt adviser (see the tip below).</p>`;
     }
-    if (plan.minimumsShortfall > 0) {
-      html += `<p class="mb-4 rounded-lg bg-yellow-50 p-4 text-sm text-yellow-800">The minimum payments are ${fmt(
-        plan.minimumsShortfall
-      )} more than you have available. Contact the people you owe before you miss a payment. Many will agree a lower amount.</p>`;
-    }
 
     if (plan.order.length === 0) {
       html += `<p class="text-body-color">${
@@ -718,11 +708,9 @@
       flash("Enter who you owe and an amount above £0.", true);
       return;
     }
-    const minPayment = toPence($("debt-min").value);
     const fields = {
       name,
       amount,
-      minPayment: minPayment > 0 ? minPayment : 0,
       dueDate: $("debt-due").value,
       notes: $("debt-notes").value.trim(),
     };
@@ -770,13 +758,21 @@
       );
       return;
     }
-    state.payments.push({
+    const payment = {
       id: newId(),
       debtId: debt.id,
       amount,
       date: $("payment-date").value || todayIso(),
       note: $("payment-note").value.trim(),
-    });
+    };
+    // A payment on a debt that is due or overdue settles that due date,
+    // so it drops off "Coming up". Undo puts the due date back.
+    const settlesDue = debt.dueDate && debt.dueDate <= todayIso();
+    if (settlesDue) {
+      payment.clearedDueDate = debt.dueDate;
+      debt.dueDate = "";
+    }
+    state.payments.push(payment);
     saveState();
     $("payment-amount").value = "";
     $("payment-note").value = "";
@@ -784,7 +780,9 @@
     flash(
       nowLeft === 0
         ? `${debt.name} is paid off!`
-        : `Paid ${fmt(amount)}. ${fmt(nowLeft)} left on ${debt.name}.`
+        : `Paid ${fmt(amount)}${
+            settlesDue ? " and cleared what was due" : ""
+          }. ${fmt(nowLeft)} left on ${debt.name}.`
     );
     render();
   });
@@ -849,9 +847,6 @@
         $("debt-id").value = d.id;
         $("debt-name").value = d.name;
         $("debt-amount").value = (d.amount / 100).toFixed(2);
-        $("debt-min").value = d.minPayment
-          ? (d.minPayment / 100).toFixed(2)
-          : "";
         $("debt-due").value = d.dueDate || "";
         $("debt-notes").value = d.notes || "";
         $("debt-submit").textContent = "Save changes";
@@ -871,6 +866,11 @@
       }
       case "delete-payment": {
         if (!confirm("Undo this payment?")) return;
+        const undone = state.payments.find((p) => p.id === id);
+        const debt = state.debts.find((d) => d.id === undone.debtId);
+        if (undone.clearedDueDate && debt && !debt.dueDate) {
+          debt.dueDate = undone.clearedDueDate;
+        }
         state.payments = state.payments.filter((p) => p.id !== id);
         saveState();
         render();

@@ -805,6 +805,10 @@ Ensure the default browser behavior of the `hidden` attribute.
   margin-left: 0.5rem;
 }
 
+.ml-1 {
+  margin-left: 0.25rem;
+}
+
 .mt-6 {
   margin-top: 1.5rem;
 }
@@ -1132,6 +1136,10 @@ Ensure the default browser behavior of the `hidden` attribute.
   scroll-behavior: smooth;
 }
 
+.whitespace-nowrap {
+  white-space: nowrap;
+}
+
 .rounded-lg {
   border-radius: 0.5rem;
 }
@@ -1375,11 +1383,6 @@ Ensure the default browser behavior of the `hidden` attribute.
 .bg-warning {
   --tw-bg-opacity: 1;
   background-color: rgb(251 191 36 / var(--tw-bg-opacity));
-}
-
-.bg-yellow-50 {
-  --tw-bg-opacity: 1;
-  background-color: rgb(254 252 232 / var(--tw-bg-opacity));
 }
 
 .bg-opacity-20 {
@@ -1820,11 +1823,6 @@ Ensure the default browser behavior of the `hidden` attribute.
 .text-\[\#adadad\] {
   --tw-text-opacity: 1;
   color: rgb(173 173 173 / var(--tw-text-opacity));
-}
-
-.text-yellow-800 {
-  --tw-text-opacity: 1;
-  color: rgb(133 77 14 / var(--tw-text-opacity));
 }
 
 .placeholder-white::-moz-placeholder {
