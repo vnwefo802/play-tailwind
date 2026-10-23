@@ -90,6 +90,25 @@
       </section>
       <!-- ====== Summary End -->
 
+      <!-- ====== Payday Start -->
+      <section
+        id="payday"
+        class="mb-10 hidden rounded-xl border-2 border-secondary bg-white p-6 shadow-input"
+      >
+        <div class="mb-2 flex flex-wrap items-baseline justify-between gap-2">
+          <h2 class="text-2xl font-bold text-dark">This Friday</h2>
+          <p id="payday-date" class="text-sm font-medium text-secondary"></p>
+        </div>
+        <ul id="payday-list"></ul>
+        <div
+          class="mt-2 flex justify-between border-t border-gray-200 pt-3 font-semibold text-dark"
+        >
+          <span>Total to pay</span>
+          <span id="payday-total"></span>
+        </div>
+      </section>
+      <!-- ====== Payday End -->
+
       <div class="-mx-4 flex flex-wrap">
         <!-- ====== Debts Start -->
         <section id="debts" class="mb-10 w-full px-4 lg:w-7/12">
@@ -196,6 +215,20 @@
                   class="rounded-lg border border-gray-200 px-3 py-2 text-sm font-medium text-dark hover:border-primary hover:text-primary"
                 >
                   Use weekly amount
+                </button>
+                <button
+                  id="sched-copy"
+                  type="button"
+                  class="rounded-lg border border-gray-200 px-3 py-2 text-sm font-medium text-dark hover:border-primary hover:text-primary"
+                >
+                  Copy to next month
+                </button>
+                <button
+                  id="sched-until"
+                  type="button"
+                  class="rounded-lg border border-gray-200 px-3 py-2 text-sm font-medium text-dark hover:border-primary hover:text-primary"
+                >
+                  Every Friday until paid off
                 </button>
                 <button
                   id="sched-clear"
