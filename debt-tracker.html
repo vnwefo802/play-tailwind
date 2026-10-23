@@ -160,17 +160,7 @@
                   class="w-full rounded-lg border border-gray-200 px-4 py-2 text-dark outline-none focus:border-primary"
                 />
               </label>
-              <label class="mb-4 w-full px-2 sm:w-1/2">
-                <span class="mb-1 block text-sm font-medium text-dark"
-                  >Next due date</span
-                >
-                <input
-                  id="debt-due"
-                  type="date"
-                  class="w-full rounded-lg border border-gray-200 px-4 py-2 text-dark outline-none focus:border-primary"
-                />
-              </label>
-              <label class="mb-4 w-full px-2 sm:w-1/2">
+              <label class="mb-4 w-full px-2">
                 <span class="mb-1 block text-sm font-medium text-dark"
                   >Notes</span
                 >
@@ -183,6 +173,44 @@
                 />
               </label>
             </div>
+            <details
+              id="debt-advanced"
+              class="mb-4 rounded-lg border border-gray-200 px-4 py-3"
+            >
+              <summary class="cursor-pointer text-sm font-medium text-dark">
+                Advanced: Friday payment plan
+                <span class="font-normal text-body-color">optional</span>
+              </summary>
+              <p class="mt-3 text-sm text-body-color">
+                Pick a month and set how much you'll pay this person on each
+                Friday (payday).
+              </p>
+              <div class="mt-3 flex flex-wrap items-center gap-2">
+                <select
+                  id="sched-month"
+                  class="rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm text-dark outline-none focus:border-primary"
+                ></select>
+                <button
+                  id="sched-fill"
+                  type="button"
+                  class="rounded-lg border border-gray-200 px-3 py-2 text-sm font-medium text-dark hover:border-primary hover:text-primary"
+                >
+                  Use weekly amount
+                </button>
+                <button
+                  id="sched-clear"
+                  type="button"
+                  class="rounded-lg px-3 py-2 text-sm font-medium text-body-color hover:text-dark"
+                >
+                  Clear month
+                </button>
+              </div>
+              <div id="sched-fridays" class="mt-3 space-y-2"></div>
+              <p
+                id="sched-total"
+                class="mt-3 border-t border-gray-100 pt-3 text-sm font-medium text-dark"
+              ></p>
+            </details>
             <div class="flex gap-3">
               <button
                 id="debt-submit"
@@ -415,7 +443,7 @@
                     <option value="smallest">
                       Smallest debt first (quick wins)
                     </option>
-                    <option value="due">Earliest due date first</option>
+                    <option value="due">Earliest pay-off deadline first</option>
                   </select>
                 </label>
                 <label class="w-32">

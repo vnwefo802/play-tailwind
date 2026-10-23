@@ -46,14 +46,14 @@
     return Math.round((monthlyAmount * 12) / PAYS_PER_YEAR[frequency]);
   }
 
-  // "smallest": smallest balance first. "due": earliest due date first
-  // (debts with no due date go last).
+  // "smallest": smallest balance first. "due": earliest pay-off deadline
+  // first (debts with no deadline go last).
   function orderDebts(debts, strategy) {
     return debts.slice().sort((a, b) => {
-      if (strategy === "due" && (a.dueDate || "") !== (b.dueDate || "")) {
-        if (!a.dueDate) return 1;
-        if (!b.dueDate) return -1;
-        return a.dueDate < b.dueDate ? -1 : 1;
+      if (strategy === "due" && (a.deadline || "") !== (b.deadline || "")) {
+        if (!a.deadline) return 1;
+        if (!b.deadline) return -1;
+        return a.deadline < b.deadline ? -1 : 1;
       }
       return a.balance - b.balance;
     });
@@ -90,7 +90,7 @@
     const debts = state.debts.map((d) => ({
       id: d.id,
       name: d.name,
-      dueDate: d.dueDate || "",
+      deadline: d.deadline || "",
       balance: remainingOn(state, d),
     }));
 
@@ -201,6 +201,57 @@
       : { kind: "behind", needed };
   }
 
+  function toIso(date) {
+    const pad = (n) => String(n).padStart(2, "0");
+    return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(
+      date.getDate()
+    )}`;
+  }
+
+  function addDays(iso, days) {
+    const d = parseDate(iso);
+    return toIso(new Date(d.getFullYear(), d.getMonth(), d.getDate() + days));
+  }
+
+  // "2026-11" -> every Friday in that month as ISO dates.
+  function fridaysInMonth(month) {
+    const [y, m] = month.split("-").map(Number);
+    const days = [];
+    for (let d = new Date(y, m - 1, 1); d.getMonth() === m - 1; ) {
+      if (d.getDay() === 5) days.push(toIso(d));
+      d = new Date(d.getFullYear(), d.getMonth(), d.getDate() + 1);
+    }
+    return days;
+  }
+
+  // A Friday payment belongs to the Monday-Sunday week around that Friday.
+  // Each planned Friday is "paid" once a payment has been logged against it,
+  // "missed" once its week is over, "thisWeek" during its week, else "later".
+  function fridayPlan(debt, payments, today) {
+    const now = toIso(today);
+    return Object.keys(debt.schedule || {})
+      .sort()
+      .map((date) => {
+        const paid = payments.some(
+          (p) => p.debtId === debt.id && p.forFriday === date
+        );
+        let status = "later";
+        if (paid) status = "paid";
+        else if (now > addDays(date, 2)) status = "missed";
+        else if (now >= addDays(date, -4)) status = "thisWeek";
+        return { date, amount: debt.schedule[date], status };
+      });
+  }
+
+  // The planned Friday a new payment should count towards: the earliest
+  // unpaid one whose week has started by the payment date.
+  function fridayForPayment(debt, payments, paymentDate) {
+    const due = fridayPlan(debt, payments, parseDate(paymentDate)).find(
+      (f) => f.status === "missed" || f.status === "thisWeek"
+    );
+    return due ? { date: due.date, missed: due.status === "missed" } : null;
+  }
+
   const calc = {
     toPence,
     paidOn,
@@ -213,6 +264,9 @@
     forecast,
     nextPayday,
     weeklyStatus,
+    fridaysInMonth,
+    fridayPlan,
+    fridayForPayment,
     daysBetween,
     parseDate,
   };
@@ -365,7 +419,6 @@
         const details = [
           d.weekly ? `${fmt(d.weekly)}/week` : "",
           d.deadline ? `pay off by ${fmtDate(parseDate(d.deadline))}` : "",
-          d.dueDate ? `due ${fmtDate(parseDate(d.dueDate))}` : "",
         ]
           .filter(Boolean)
           .join(" · ");
@@ -389,6 +442,7 @@
                   : ""
               }
               ${renderWeeklyStatus(d, left)}
+              ${done ? "" : renderNextFriday(d)}
               ${
                 d.notes
                   ? `<p class="mt-1 text-sm italic text-body-color">${esc(
@@ -457,12 +511,52 @@
     return `<p class="mt-1 text-sm font-medium ${colour}">${esc(text)}</p>`;
   }
 
+  function renderNextFriday(d) {
+    const next = fridayPlan(d, state.payments, new Date()).find(
+      (f) => f.status !== "paid"
+    );
+    if (!next) return "";
+    const when = fmtFriday(next.date);
+    const [colour, text] =
+      next.status === "missed"
+        ? [
+            "text-red-600",
+            `Missed Friday payment: ${fmt(next.amount)} on ${when}`,
+          ]
+        : next.date === todayIso()
+        ? ["text-primary", `Payday today: pay ${fmt(next.amount)}`]
+        : [
+            "text-primary",
+            `Next Friday payment: ${fmt(next.amount)} on ${when}`,
+          ];
+    return `<p class="mt-1 text-sm font-medium ${colour}">${esc(text)}</p>`;
+  }
+
+  function fmtFriday(iso) {
+    return parseDate(iso).toLocaleDateString("en-GB", {
+      weekday: "short",
+      day: "numeric",
+      month: "short",
+    });
+  }
+
+  // What to pay now: a missed or this week's Friday amount, else the weekly
+  // amount, never more than is left.
+  function suggestedAmount(debt) {
+    const left = remainingOn(state, debt);
+    const friday = fridayPlan(debt, state.payments, new Date()).find(
+      (f) => f.status === "missed" || f.status === "thisWeek"
+    );
+    const amount = friday ? friday.amount : debt.weekly;
+    return amount ? Math.min(amount, left) : 0;
+  }
+
   function weeklyPlaceholder() {
     const debt = state.debts.find((d) => d.id === $("payment-debt").value);
-    $("payment-amount").placeholder =
-      debt && debt.weekly
-        ? (Math.min(debt.weekly, remainingOn(state, debt)) / 100).toFixed(2)
-        : "0.00";
+    const amount = debt ? suggestedAmount(debt) : 0;
+    $("payment-amount").placeholder = amount
+      ? (amount / 100).toFixed(2)
+      : "0.00";
   }
 
   function renderPaymentForm() {
@@ -483,6 +577,21 @@
     $("payment-submit").disabled = open.length === 0;
     weeklyPlaceholder();
     if (!$("payment-date").value) $("payment-date").value = todayIso();
+  }
+
+  function paymentLabel(p) {
+    if (p.forFriday) {
+      return p.missed
+        ? "Paid off overdue"
+        : `Friday payment ${fmtFriday(p.forFriday)}`;
+    }
+    // Payments logged before the Friday plan existed.
+    if (p.clearedDueDate) {
+      return p.clearedDueDate < p.date
+        ? "Paid off overdue"
+        : "Paid on due date";
+    }
+    return "";
   }
 
   function renderPayments() {
@@ -507,12 +616,10 @@
           <td class="py-2 pr-3 text-dark">${esc(
             names[p.debtId] || "Deleted debt"
           )}${
-          p.clearedDueDate
-            ? ` <span class="ml-1 whitespace-nowrap rounded-full bg-secondary px-2 py-0.5 text-xs font-medium text-white">${
-                p.clearedDueDate < p.date
-                  ? "Paid off overdue"
-                  : "Paid on due date"
-              }</span>`
+          paymentLabel(p)
+            ? ` <span class="ml-1 whitespace-nowrap rounded-full bg-secondary px-2 py-0.5 text-xs font-medium text-white">${paymentLabel(
+                p
+              )}</span>`
             : ""
         }${
           p.note
@@ -535,36 +642,80 @@
   function renderDueDates() {
     const list = $("due-list");
     const today = new Date();
-    const items = state.debts
-      .filter((d) => d.dueDate && remainingOn(state, d) > 0)
-      .map((d) => ({ debt: d, days: daysBetween(today, parseDate(d.dueDate)) }))
-      .sort((a, b) => a.days - b.days);
+    const items = [];
+    const pill = (classes, text) =>
+      `<span class="whitespace-nowrap rounded-full px-2 py-0.5 text-xs font-medium ${classes}">${text}</span>`;
+
+    state.debts.forEach((debt) => {
+      const left = remainingOn(state, debt);
+      if (left === 0) return;
+      const plan = fridayPlan(debt, state.payments, today);
+      const upcoming = plan.find(
+        (f) => f.status === "thisWeek" || f.status === "later"
+      );
+      plan
+        .filter((f) => f.status === "missed" || f === upcoming)
+        .forEach((f) => {
+          const days = daysBetween(today, parseDate(f.date));
+          if (f.status === "later" && days > 14) return;
+          let badge = pill("bg-gray-100 text-body-color", `in ${days} days`);
+          if (f.status === "missed")
+            badge = pill("bg-red-600 text-white", "Missed");
+          else if (days === 0)
+            badge = pill("bg-secondary text-white", "Payday today");
+          else if (f.status === "thisWeek")
+            badge = pill(
+              "bg-warning text-dark",
+              days < 0 ? "This week" : "This Friday"
+            );
+          items.push({
+            days,
+            html: `<span><span class="font-medium text-dark">${esc(
+              debt.name
+            )}</span> <span class="text-body-color">· pay ${fmt(
+              Math.min(f.amount, left)
+            )} · ${fmtFriday(f.date)}</span></span>${badge}`,
+          });
+        });
+
+      if (debt.deadline) {
+        const days = daysBetween(today, parseDate(debt.deadline));
+        if (days > 30) return;
+        const badge =
+          days < 0
+            ? pill("bg-red-600 text-white", "Deadline passed")
+            : pill(
+                days <= 14
+                  ? "bg-warning text-dark"
+                  : "bg-gray-100 text-body-color",
+                days === 0 ? "Deadline today" : `in ${days} days`
+              );
+        items.push({
+          days,
+          html: `<span><span class="font-medium text-dark">${esc(
+            debt.name
+          )}</span> <span class="text-body-color">· ${fmt(
+            left
+          )} left · pay off by ${fmtDate(
+            parseDate(debt.deadline)
+          )}</span></span>${badge}`,
+        });
+      }
+    });
 
     if (items.length === 0) {
-      list.innerHTML = `<li class="text-body-color">Nothing due. Add a due date when you add or edit a debt.</li>`;
+      list.innerHTML = `<li class="text-body-color">Nothing coming up. Add a Friday payment plan or a pay-off deadline to a debt.</li>`;
       return;
     }
 
     list.innerHTML = items
-      .map(({ debt, days }) => {
-        let badge = `<span class="rounded-full bg-gray-100 px-2 py-0.5 text-xs text-body-color">in ${days} days</span>`;
-        if (days < 0) {
-          badge = `<span class="rounded-full bg-red-600 px-2 py-0.5 text-xs font-medium text-white">${-days} days overdue</span>`;
-        } else if (days === 0) {
-          badge = `<span class="rounded-full bg-red-600 px-2 py-0.5 text-xs font-medium text-white">Due today</span>`;
-        } else if (days <= 14) {
-          badge = `<span class="rounded-full bg-warning px-2 py-0.5 text-xs font-medium text-dark">in ${days} days</span>`;
-        }
-        return `
+      .sort((a, b) => a.days - b.days)
+      .map(
+        (item) => `
         <li class="flex flex-wrap items-center justify-between gap-2 border-t border-gray-100 py-2 first:border-t-0">
-          <span><span class="font-medium text-dark">${esc(
-            debt.name
-          )}</span> <span class="text-body-color">· ${fmt(
-          remainingOn(state, debt)
-        )} · ${fmtDate(parseDate(debt.dueDate))}</span></span>
-          ${badge}
-        </li>`;
-      })
+          ${item.html}
+        </li>`
+      )
       .join("");
   }
 
@@ -757,9 +908,107 @@
 
   // ===== Actions =====
 
+  // The Friday plan being edited in the debt form, as { isoDate: pence }.
+  let formSchedule = {};
+
+  function monthOptions() {
+    const now = new Date();
+    const months = new Set();
+    for (let i = 0; i < 12; i++) {
+      const d = new Date(now.getFullYear(), now.getMonth() + i, 1);
+      months.add(toIso(d).slice(0, 7));
+    }
+    Object.keys(formSchedule).forEach((date) => months.add(date.slice(0, 7)));
+    return [...months].sort();
+  }
+
+  function renderScheduleForm(month) {
+    const select = $("sched-month");
+    select.innerHTML = monthOptions()
+      .map(
+        (m) =>
+          `<option value="${m}">${parseDate(m + "-01").toLocaleDateString(
+            "en-GB",
+            { month: "long", year: "numeric" }
+          )}</option>`
+      )
+      .join("");
+    select.value = month || todayIso().slice(0, 7);
+    renderFridays();
+  }
+
+  function renderFridays() {
+    const month = $("sched-month").value;
+    const fridays = fridaysInMonth(month);
+    $("sched-fridays").innerHTML = fridays
+      .map(
+        (date) => `
+        <label class="flex items-center justify-between gap-3">
+          <span class="text-sm ${
+            fridayIsPast(date) ? "text-body-color" : "text-dark"
+          }">${fmtFriday(date)}${fridayIsPast(date) ? " (past)" : ""}</span>
+          <input data-friday="${date}" type="number" min="0" step="0.01" inputmode="decimal"
+            value="${
+              formSchedule[date] ? (formSchedule[date] / 100).toFixed(2) : ""
+            }"
+            placeholder="0.00"
+            class="w-32 rounded-lg border border-gray-200 px-3 py-1.5 text-right text-dark outline-none focus:border-primary" />
+        </label>`
+      )
+      .join("");
+    const total = fridays.reduce((t, d) => t + (formSchedule[d] || 0), 0);
+    $("sched-total").textContent = `${fridays.length} Fridays · ${fmt(
+      total
+    )} planned this month`;
+  }
+
+  function fridayIsPast(date) {
+    return addDays(date, 2) < todayIso();
+  }
+
+  $("sched-month").addEventListener("change", renderFridays);
+
+  $("sched-fridays").addEventListener("input", (e) => {
+    const date = e.target.dataset.friday;
+    if (!date) return;
+    const amount = toPence(e.target.value);
+    if (amount > 0) formSchedule[date] = amount;
+    else delete formSchedule[date];
+    const fridays = fridaysInMonth($("sched-month").value);
+    const total = fridays.reduce((t, d) => t + (formSchedule[d] || 0), 0);
+    $("sched-total").textContent = `${fridays.length} Fridays · ${fmt(
+      total
+    )} planned this month`;
+  });
+
+  $("sched-fill").addEventListener("click", () => {
+    const weekly = toPence($("debt-weekly").value);
+    if (!(weekly > 0)) {
+      flash("Enter a weekly payment above first.", true);
+      return;
+    }
+    // Only this week's Friday onwards; earlier ones are already over.
+    fridaysInMonth($("sched-month").value)
+      .filter((date) => !fridayIsPast(date))
+      .forEach((date) => {
+        formSchedule[date] = weekly;
+      });
+    renderFridays();
+  });
+
+  $("sched-clear").addEventListener("click", () => {
+    fridaysInMonth($("sched-month").value).forEach((date) => {
+      delete formSchedule[date];
+    });
+    renderFridays();
+  });
+
   function resetDebtForm() {
     $("debt-form").reset();
     $("debt-id").value = "";
+    formSchedule = {};
+    $("debt-advanced").open = false;
+    renderScheduleForm();
     $("debt-submit").textContent = "Add debt";
     $("debt-cancel").classList.add("hidden");
   }
@@ -779,7 +1028,7 @@
       amount,
       weekly: weekly > 0 ? weekly : 0,
       deadline: $("debt-deadline").value,
-      dueDate: $("debt-due").value,
+      schedule: Object.assign({}, formSchedule),
       notes: $("debt-notes").value.trim(),
     };
 
@@ -833,12 +1082,12 @@
       date: $("payment-date").value || todayIso(),
       note: $("payment-note").value.trim(),
     };
-    // A payment on a debt that is due or overdue settles that due date,
-    // so it drops off "Coming up". Undo puts the due date back.
-    const settlesDue = debt.dueDate && debt.dueDate <= todayIso();
-    if (settlesDue) {
-      payment.clearedDueDate = debt.dueDate;
-      debt.dueDate = "";
+    // Count the payment towards a missed or this week's planned Friday, so it
+    // drops off "Coming up". Undoing the payment brings it back.
+    const friday = fridayForPayment(debt, state.payments, payment.date);
+    if (friday) {
+      payment.forFriday = friday.date;
+      payment.missed = friday.missed;
     }
     state.payments.push(payment);
     saveState();
@@ -849,7 +1098,11 @@
       nowLeft === 0
         ? `${debt.name} is paid off!`
         : `Paid ${fmt(amount)}${
-            settlesDue ? " and cleared what was due" : ""
+            friday && friday.missed
+              ? " and cleared the missed Friday payment"
+              : friday
+              ? ` for ${fmtFriday(friday.date)}`
+              : ""
           }. ${fmt(nowLeft)} left on ${debt.name}.`
     );
     render();
@@ -910,10 +1163,8 @@
         const d = state.debts.find((x) => x.id === id);
         $("payment-debt").value = id;
         weeklyPlaceholder();
-        if (d.weekly) {
-          $("payment-amount").value = (
-            Math.min(d.weekly, remainingOn(state, d)) / 100
-          ).toFixed(2);
+        if (suggestedAmount(d)) {
+          $("payment-amount").value = (suggestedAmount(d) / 100).toFixed(2);
         }
         $("payments").scrollIntoView({ behavior: "smooth" });
         $("payment-amount").focus({ preventScroll: true });
@@ -926,7 +1177,12 @@
         $("debt-amount").value = (d.amount / 100).toFixed(2);
         $("debt-weekly").value = d.weekly ? (d.weekly / 100).toFixed(2) : "";
         $("debt-deadline").value = d.deadline || "";
-        $("debt-due").value = d.dueDate || "";
+        formSchedule = Object.assign({}, d.schedule || {});
+        const upcoming = Object.keys(formSchedule)
+          .sort()
+          .find((date) => date >= todayIso());
+        renderScheduleForm(upcoming && upcoming.slice(0, 7));
+        $("debt-advanced").open = Object.keys(formSchedule).length > 0;
         $("debt-notes").value = d.notes || "";
         $("debt-submit").textContent = "Save changes";
         $("debt-cancel").classList.remove("hidden");
@@ -945,11 +1201,6 @@
       }
       case "delete-payment": {
         if (!confirm("Undo this payment?")) return;
-        const undone = state.payments.find((p) => p.id === id);
-        const debt = state.debts.find((d) => d.id === undone.debtId);
-        if (undone.clearedDueDate && debt && !debt.dueDate) {
-          debt.dueDate = undone.clearedDueDate;
-        }
         state.payments = state.payments.filter((p) => p.id !== id);
         saveState();
         render();
@@ -1016,5 +1267,6 @@
     flash("Tracker cleared.");
   });
 
+  renderScheduleForm();
   render();
 })(typeof window !== "undefined" ? window : globalThis);
