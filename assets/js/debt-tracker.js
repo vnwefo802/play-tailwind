@@ -178,6 +178,29 @@
     return date;
   }
 
+  // Progress towards an optional weekly amount and pay-off deadline, assuming
+  // the weekly payments start a week from today.
+  function weeklyStatus(remaining, weekly, deadline, today) {
+    if (remaining <= 0 || (!weekly && !deadline)) return null;
+    const days = deadline ? daysBetween(today, parseDate(deadline)) : null;
+    if (days !== null && days < 0) return { kind: "late" };
+    const weeksToFinish = weekly ? Math.ceil(remaining / weekly) : null;
+    const finish = weekly
+      ? new Date(
+          today.getFullYear(),
+          today.getMonth(),
+          today.getDate() + weeksToFinish * 7
+        )
+      : null;
+    if (days === null) return { kind: "estimate", finish };
+    const weeksAvailable = Math.max(Math.floor(days / 7), 1);
+    const needed = Math.ceil(remaining / weeksAvailable);
+    if (!weekly) return { kind: "needed", needed };
+    return weeksToFinish <= weeksAvailable
+      ? { kind: "onTrack", finish }
+      : { kind: "behind", needed };
+  }
+
   const calc = {
     toPence,
     paidOn,
@@ -189,6 +212,7 @@
     buildPlan,
     forecast,
     nextPayday,
+    weeklyStatus,
     daysBetween,
     parseDate,
   };
@@ -339,6 +363,8 @@
           : 0;
         const done = left === 0;
         const details = [
+          d.weekly ? `${fmt(d.weekly)}/week` : "",
+          d.deadline ? `pay off by ${fmtDate(parseDate(d.deadline))}` : "",
           d.dueDate ? `due ${fmtDate(parseDate(d.dueDate))}` : "",
         ]
           .filter(Boolean)
@@ -362,6 +388,7 @@
                   ? `<p class="text-sm text-body-color">${esc(details)}</p>`
                   : ""
               }
+              ${renderWeeklyStatus(d, left)}
               ${
                 d.notes
                   ? `<p class="mt-1 text-sm italic text-body-color">${esc(
@@ -401,6 +428,43 @@
       .join("");
   }
 
+  function renderWeeklyStatus(d, left) {
+    const status = weeklyStatus(left, d.weekly, d.deadline, new Date());
+    if (!status) return "";
+    const by = d.deadline ? fmtDate(parseDate(d.deadline)) : "";
+    const lines = {
+      late: ["text-red-600", "The pay-off deadline has passed"],
+      onTrack: [
+        "text-secondary",
+        `On track: paid off around ${status.finish && fmtDate(status.finish)}`,
+      ],
+      behind: [
+        "text-yellow-700",
+        `Behind: pay ${fmt(status.needed)}/week to finish by ${by}`,
+      ],
+      estimate: [
+        "text-body-color",
+        `Paid off around ${
+          status.finish && fmtDate(status.finish)
+        } at this rate`,
+      ],
+      needed: [
+        "text-body-color",
+        `${fmt(status.needed)}/week would finish it by ${by}`,
+      ],
+    };
+    const [colour, text] = lines[status.kind];
+    return `<p class="mt-1 text-sm font-medium ${colour}">${esc(text)}</p>`;
+  }
+
+  function weeklyPlaceholder() {
+    const debt = state.debts.find((d) => d.id === $("payment-debt").value);
+    $("payment-amount").placeholder =
+      debt && debt.weekly
+        ? (Math.min(debt.weekly, remainingOn(state, debt)) / 100).toFixed(2)
+        : "0.00";
+  }
+
   function renderPaymentForm() {
     const select = $("payment-debt");
     const current = select.value;
@@ -417,6 +481,7 @@
       : `<option value="">No debts to pay</option>`;
     if (open.some((d) => d.id === current)) select.value = current;
     $("payment-submit").disabled = open.length === 0;
+    weeklyPlaceholder();
     if (!$("payment-date").value) $("payment-date").value = todayIso();
   }
 
@@ -708,9 +773,12 @@
       flash("Enter who you owe and an amount above £0.", true);
       return;
     }
+    const weekly = toPence($("debt-weekly").value);
     const fields = {
       name,
       amount,
+      weekly: weekly > 0 ? weekly : 0,
+      deadline: $("debt-deadline").value,
       dueDate: $("debt-due").value,
       notes: $("debt-notes").value.trim(),
     };
@@ -787,6 +855,8 @@
     render();
   });
 
+  $("payment-debt").addEventListener("change", weeklyPlaceholder);
+
   $("pay-form").addEventListener("submit", (e) => {
     e.preventDefault();
     const amount = toPence($("pay-amount").value);
@@ -837,7 +907,14 @@
 
     switch (btn.dataset.action) {
       case "pay": {
+        const d = state.debts.find((x) => x.id === id);
         $("payment-debt").value = id;
+        weeklyPlaceholder();
+        if (d.weekly) {
+          $("payment-amount").value = (
+            Math.min(d.weekly, remainingOn(state, d)) / 100
+          ).toFixed(2);
+        }
         $("payments").scrollIntoView({ behavior: "smooth" });
         $("payment-amount").focus({ preventScroll: true });
         break;
@@ -847,6 +924,8 @@
         $("debt-id").value = d.id;
         $("debt-name").value = d.name;
         $("debt-amount").value = (d.amount / 100).toFixed(2);
+        $("debt-weekly").value = d.weekly ? (d.weekly / 100).toFixed(2) : "";
+        $("debt-deadline").value = d.deadline || "";
         $("debt-due").value = d.dueDate || "";
         $("debt-notes").value = d.notes || "";
         $("debt-submit").textContent = "Save changes";
