@@ -788,16 +788,16 @@ Ensure the default browser behavior of the `hidden` attribute.
   margin-top: 1.5rem;
 }
 
+.mt-4 {
+  margin-top: 1rem;
+}
+
 .mt-3 {
   margin-top: 0.75rem;
 }
 
 .mb-3 {
   margin-bottom: 0.75rem;
-}
-
-.mt-4 {
-  margin-top: 1rem;
 }
 
 .mt-16 {
@@ -890,6 +890,14 @@ Ensure the default browser behavior of the `hidden` attribute.
 
 .h-48 {
   height: 12rem;
+}
+
+.h-32 {
+  height: 8rem;
+}
+
+.h-40 {
+  height: 10rem;
 }
 
 .h-\[70px\] {
@@ -1014,6 +1022,10 @@ Ensure the default browser behavior of the `hidden` attribute.
 
 .max-w-\[80px\] {
   max-width: 80px;
+}
+
+.max-w-md {
+  max-width: 28rem;
 }
 
 .max-w-sm {
@@ -1688,6 +1700,10 @@ Ensure the default browser behavior of the `hidden` attribute.
   padding-top: 1.5rem;
 }
 
+.pb-32 {
+  padding-bottom: 8rem;
+}
+
 .pt-3 {
   padding-top: 0.75rem;
 }
@@ -1837,6 +1853,10 @@ Ensure the default browser behavior of the `hidden` attribute.
 
 .leading-\[26px\] {
   line-height: 26px;
+}
+
+.leading-none {
+  line-height: 1;
 }
 
 .tracking-wide {
@@ -2396,12 +2416,24 @@ body {
     display: flex;
   }
 
+  .sm\:h-48 {
+    height: 12rem;
+  }
+
   .sm\:w-1\/2 {
     width: 50%;
   }
 
   .sm\:w-auto {
     width: auto;
+  }
+
+  .sm\:w-72 {
+    width: 18rem;
+  }
+
+  .sm\:max-w-\[55\%\] {
+    max-width: 55%;
   }
 
   .sm\:flex-1 {

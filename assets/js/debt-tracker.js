@@ -238,6 +238,12 @@
     );
   }
 
+  // The next payday from `today`: this week's Friday unless it has passed.
+  function nextFriday(today) {
+    const friday = weekFriday(today);
+    return friday < toIso(today) ? addDays(friday, 7) : friday;
+  }
+
   // Whether the payment for a given Friday has been made: one logged against
   // it, or (with no plan for that Friday) any payment in its week.
   function fridayPaid(debt, payments, friday) {
@@ -259,12 +265,12 @@
     return planned !== undefined ? planned : debt.weekly || 0;
   }
 
-  // Walk the Fridays from this week on, paying the planned or weekly amounts,
+  // Walk the Fridays from the next payday on, paying the planned or weekly amounts,
   // to see when the debt is cleared. `finish` is null if the plan runs out.
   function projection(debt, remaining, payments, today) {
     const plannedDates = Object.keys(debt.schedule || {}).sort();
     const lastPlanned = plannedDates[plannedDates.length - 1] || "";
-    let friday = weekFriday(today);
+    let friday = nextFriday(today);
     let covered = 0;
     for (let week = 0; week < 520; week++) {
       if (!debt.weekly && friday > lastPlanned) break;
@@ -287,7 +293,7 @@
     if (debt.deadline && debt.deadline < toIso(today)) return { kind: "late" };
     let fridays = 0;
     if (debt.deadline) {
-      for (let f = weekFriday(today); f <= debt.deadline; f = addDays(f, 7)) {
+      for (let f = nextFriday(today); f <= debt.deadline; f = addDays(f, 7)) {
         fridays++;
       }
     }
@@ -308,9 +314,7 @@
   // Everything to pay on the coming payday (this week's Friday, or next
   // week's at the weekend), plus missed planned Fridays still unpaid.
   function paydayItems(debts, payments, today) {
-    const now = toIso(today);
-    let payday = weekFriday(today);
-    if (payday < now) payday = addDays(payday, 7);
+    const payday = nextFriday(today);
     const items = [];
     debts.forEach((debt) => {
       let left =
@@ -408,6 +412,67 @@
     });
   }
 
+  // When everything will be paid off. Uses each debt's Friday plan or
+  // weekly amount when every debt left has one (the last Friday any of them
+  // is cleared); otherwise the budget plan from take-home pay, to the month.
+  function debtFreeDate(state, today) {
+    const owing = state.debts
+      .map((d) => ({ d, left: remainingOn(state, d) }))
+      .filter((x) => x.left > 0);
+    if (owing.length === 0) return { kind: "done" };
+    const finishes = owing.map(
+      (x) => projection(x.d, x.left, state.payments, today).finish
+    );
+    if (finishes.every(Boolean)) {
+      return {
+        kind: "date",
+        date: finishes.sort()[finishes.length - 1],
+        source: "fridays",
+      };
+    }
+    if (state.pay && state.pay.amount) {
+      const f = buildPlan(state).forecast;
+      if (f.possible && f.months) {
+        const first =
+          nextPayday(state.pay.nextPayDate, state.pay.frequency, today) ||
+          today;
+        return {
+          kind: "month",
+          date: toIso(addMonths(first, f.months - 1)),
+          source: "budget",
+        };
+      }
+    }
+    return {
+      kind: "unknown",
+      missing: owing.filter((x, i) => !finishes[i]).map((x) => debtLabel(x.d)),
+    };
+  }
+
+  // Whole years, months, weeks and days from today until `iso`.
+  function countdown(today, iso) {
+    const end = parseDate(iso);
+    let months =
+      (end.getFullYear() - today.getFullYear()) * 12 +
+      end.getMonth() -
+      today.getMonth();
+    if (end.getDate() < today.getDate()) months--;
+    months = Math.max(months, 0);
+    const afterMonths = new Date(
+      today.getFullYear(),
+      today.getMonth() + months,
+      today.getDate()
+    );
+    const days = Math.max(daysBetween(afterMonths, end), 0);
+    return {
+      years: Math.floor(months / 12),
+      months: months % 12,
+      weeks: Math.floor(days / 7),
+      days: days % 7,
+      totalDays: Math.max(daysBetween(today, end), 0),
+    };
+  }
+
   const calc = {
     toPence,
     paidOn,
@@ -428,6 +493,8 @@
     groupDebts,
     normalizeState,
     leftByPerson,
+    debtFreeDate,
+    countdown,
     fridaysInMonth,
     fridayPlan,
     fridayForPayment,
@@ -536,6 +603,7 @@
   function render() {
     renderSummary();
     renderCharts();
+    renderCountdown();
     renderPayday();
     renderDebts();
     renderPaymentForm();
@@ -688,6 +756,53 @@
           )
           .join("")
       : `<li class="text-secondary font-medium">Everything is paid off.</li>`;
+  }
+
+  function renderCountdown() {
+    const today = new Date();
+    const result = debtFreeDate(state, today);
+    $("countdown").classList.toggle("hidden", state.debts.length === 0);
+    const unit = (n, one, many) => `
+      <div>
+        <p class="text-4xl font-bold leading-none tabular-nums">${n}</p>
+        <p class="mt-1 text-sm opacity-80">${n === 1 ? one : many}</p>
+      </div>`;
+
+    if (result.kind === "done") {
+      $("countdown-when").textContent = "You're debt-free!";
+      $("countdown-units").innerHTML = "";
+      $("countdown-note").textContent = "Every debt is paid off. Well done.";
+      return;
+    }
+    if (result.kind === "unknown") {
+      $("countdown-when").textContent = "Not worked out yet";
+      $("countdown-units").innerHTML = "";
+      $(
+        "countdown-note"
+      ).textContent = `Add a weekly amount or Friday plan to ${result.missing.join(
+        ", "
+      )}, or enter your take-home pay, to see your date.`;
+      return;
+    }
+    const end = parseDate(result.date);
+    $("countdown-when").textContent = end.toLocaleDateString("en-GB", {
+      month: "long",
+      year: "numeric",
+    });
+    const c = countdown(today, result.date);
+    const parts =
+      c.years > 0
+        ? [unit(c.years, "year", "years"), unit(c.months, "month", "months")]
+        : c.months > 0
+        ? [unit(c.months, "month", "months"), unit(c.weeks, "week", "weeks")]
+        : [unit(c.weeks, "week", "weeks"), unit(c.days, "day", "days")];
+    $("countdown-units").innerHTML = parts.join("");
+    $("countdown-note").textContent =
+      result.source === "fridays"
+        ? `Last payment on ${fmtFriday(
+            result.date
+          )} ${end.getFullYear()}, going by your Friday plans and weekly amounts.`
+        : "Going by your budget plan. Add weekly amounts to your debts for an exact Friday.";
   }
 
   function renderPayday() {
