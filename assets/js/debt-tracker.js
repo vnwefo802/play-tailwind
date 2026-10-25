@@ -480,6 +480,46 @@
     };
   }
 
+  // Planned Friday payments for monthly bills (essentials), worked out the
+  // same way as a debt's Friday plan: each bill's own `schedule`, with
+  // bill payments logged against a Friday.
+  function billPlan(bill, billPayments, today) {
+    const asPayments = billPayments.map((p) => ({
+      debtId: p.essentialId,
+      forFriday: p.friday,
+    }));
+    return fridayPlan(
+      { id: bill.id, schedule: bill.schedule || {} },
+      asPayments,
+      today
+    );
+  }
+
+  // Bills to pay on the coming payday, plus planned bill Fridays missed or
+  // still unpaid from this week.
+  function paydayBills(bills, billPayments, today) {
+    const payday = nextFriday(today);
+    const items = [];
+    bills.forEach((bill) => {
+      billPlan(bill, billPayments, today)
+        .filter(
+          (f) =>
+            f.status === "missed" ||
+            f.status === "thisWeek" ||
+            (f.status === "later" && f.date === payday)
+        )
+        .forEach((f) =>
+          items.push({
+            essentialId: bill.id,
+            friday: f.date,
+            amount: f.amount,
+            missed: f.status === "missed",
+          })
+        );
+    });
+    return items;
+  }
+
   const calc = {
     toPence,
     paidOn,
@@ -502,6 +542,8 @@
     leftByPerson,
     debtFreeDate,
     countdown,
+    billPlan,
+    paydayBills,
     fridaysInMonth,
     fridayPlan,
     fridayForPayment,
@@ -523,6 +565,7 @@
       essentials: [],
       debts: [],
       payments: [],
+      billPayments: [],
       plan: { strategy: "smallest", bufferPercent: 10 },
     };
   }
@@ -824,16 +867,21 @@
       state.payments,
       new Date()
     );
-    $("payday").classList.toggle("hidden", items.length === 0);
-    if (items.length === 0) return;
+    const bills = paydayBills(state.essentials, state.billPayments, new Date());
+    $("payday").classList.toggle(
+      "hidden",
+      items.length === 0 && bills.length === 0
+    );
+    if (items.length === 0 && bills.length === 0) return;
     const names = Object.fromEntries(
       state.debts.map((d) => [d.id, debtLabel(d)])
     );
     $("payday-date").textContent =
       payday === todayIso() ? "Today is payday" : fmtFriday(payday);
-    $("payday-list").innerHTML = items
-      .map(
-        (item) => `
+    $("payday-list").innerHTML =
+      items
+        .map(
+          (item) => `
         <li class="flex flex-wrap items-center justify-between gap-2 border-t border-gray-100 py-3 first:border-t-0">
           <span>
             <span class="font-medium text-dark">${esc(
@@ -856,15 +904,53 @@
             <button data-action="payday-paid" data-id="${
               item.debtId
             }" data-friday="${item.friday}" data-amount="${
-          item.amount
-        }" data-missed="${
-          item.missed ? 1 : ""
-        }" class="rounded-lg bg-secondary px-3 py-1 text-sm font-medium text-white hover:bg-opacity-90">Mark paid</button>
+            item.amount
+          }" data-missed="${
+            item.missed ? 1 : ""
+          }" class="rounded-lg bg-secondary px-3 py-1 text-sm font-medium text-white hover:bg-opacity-90">Mark paid</button>
           </span>
         </li>`
-      )
-      .join("");
-    $("payday-total").textContent = fmt(sum(items, (i) => i.amount));
+        )
+        .join("") + bills.map((bill) => billRow(bill, payday)).join("");
+    $("payday-total").textContent = fmt(
+      sum(items, (i) => i.amount) + sum(bills, (b) => b.amount)
+    );
+  }
+
+  function billRow(item, payday) {
+    const bill = state.essentials.find((e) => e.id === item.essentialId);
+    const tag = item.missed
+      ? `<span class="ml-1 whitespace-nowrap rounded-full bg-red-600 px-2 py-0.5 text-xs font-medium text-white">Missed ${fmtFriday(
+          item.friday
+        )}</span>`
+      : item.friday !== payday
+      ? `<span class="ml-1 whitespace-nowrap rounded-full bg-warning px-2 py-0.5 text-xs font-medium text-dark">From ${fmtFriday(
+          item.friday
+        )}</span>`
+      : "";
+    return `
+        <li class="flex flex-wrap items-center justify-between gap-2 border-t border-gray-100 py-3 first:border-t-0">
+          <span>
+            <span class="font-medium text-dark">${esc(bill.name)}</span>
+            <span class="ml-1 whitespace-nowrap rounded-full bg-gray-100 px-2 py-0.5 text-xs font-medium text-body-color">Bill</span>
+            ${tag}
+            ${
+              bill.note
+                ? `<span class="block text-xs text-body-color">${esc(
+                    bill.note
+                  )}</span>`
+                : ""
+            }
+          </span>
+          <span class="flex items-center gap-3">
+            <span class="font-semibold text-dark">${fmt(item.amount)}</span>
+            <button data-action="bill-paid" data-id="${bill.id}" data-friday="${
+      item.friday
+    }" data-amount="${
+      item.amount
+    }" class="rounded-lg bg-secondary px-3 py-1 text-sm font-medium text-white hover:bg-opacity-90">Mark paid</button>
+          </span>
+        </li>`;
   }
 
   function renderSummary() {
@@ -1129,8 +1215,18 @@
     const names = Object.fromEntries(
       state.debts.map((d) => [d.id, debtLabel(d)])
     );
+    const billNames = Object.fromEntries(
+      state.essentials.map((e) => [e.id, e.name])
+    );
     const payments = state.payments
-      .slice()
+      .concat(
+        state.billPayments.map((b) => ({
+          id: b.id,
+          amount: b.amount,
+          date: b.date,
+          bill: billNames[b.essentialId] || "Removed bill",
+        }))
+      )
       .sort((a, b) => (a.date < b.date ? 1 : a.date > b.date ? -1 : 0));
 
     if (payments.length === 0) {
@@ -1146,8 +1242,12 @@
             parseDate(p.date)
           )}</td>
           <td class="py-2 pr-3 text-dark">${esc(
-            names[p.debtId] || "Deleted debt"
+            p.bill || names[p.debtId] || "Deleted debt"
           )}${
+          p.bill
+            ? ` <span class="ml-1 whitespace-nowrap rounded-full bg-gray-100 px-2 py-0.5 text-xs font-medium text-body-color">Bill</span>`
+            : ""
+        }${
           paymentLabel(p)
             ? ` <span class="ml-1 whitespace-nowrap rounded-full bg-secondary px-2 py-0.5 text-xs font-medium text-white">${paymentLabel(
                 p
@@ -1163,9 +1263,11 @@
           <td class="py-2 pr-3 text-right font-medium text-dark">${fmt(
             p.amount
           )}</td>
-          <td class="py-2 text-right"><button data-action="delete-payment" data-id="${
-            p.id
-          }" class="text-xs font-medium text-red-600 hover:underline">Undo</button></td>
+          <td class="py-2 text-right"><button data-action="${
+            p.bill ? "delete-bill-payment" : "delete-payment"
+          }" data-id="${
+          p.id
+        }" class="text-xs font-medium text-red-600 hover:underline">Undo</button></td>
         </tr>`
       )
       .join("");
@@ -1235,6 +1337,37 @@
       }
     });
 
+    state.essentials.forEach((bill) => {
+      const plan = billPlan(bill, state.billPayments, today);
+      const upcoming = plan.find(
+        (f) => f.status === "thisWeek" || f.status === "later"
+      );
+      plan
+        .filter((f) => f.status === "missed" || f === upcoming)
+        .forEach((f) => {
+          const days = daysBetween(today, parseDate(f.date));
+          if (f.status === "later" && days > 14) return;
+          let badge = pill("bg-gray-100 text-body-color", `in ${days} days`);
+          if (f.status === "missed")
+            badge = pill("bg-red-600 text-white", "Missed");
+          else if (days === 0)
+            badge = pill("bg-secondary text-white", "Payday today");
+          else if (f.status === "thisWeek")
+            badge = pill(
+              "bg-warning text-dark",
+              days < 0 ? "This week" : "This Friday"
+            );
+          items.push({
+            days,
+            html: `<span><span class="font-medium text-dark">${esc(
+              bill.name
+            )}</span> <span class="text-body-color">· bill · pay ${fmt(
+              f.amount
+            )} · ${fmtFriday(f.date)}</span></span>${badge}`,
+          });
+        });
+    });
+
     if (items.length === 0) {
       list.innerHTML = `<li class="text-body-color">Nothing coming up. Add a Friday payment plan or a pay-off deadline to a debt.</li>`;
       return;
@@ -1277,8 +1410,9 @@
       list.innerHTML = state.essentials
         .map(
           (e) => `
-          <li class="flex items-center justify-between border-t border-gray-100 py-2 first:border-t-0">
-            <span class="text-dark">${esc(e.name)}</span>
+          <li class="border-t border-gray-100 py-2 first:border-t-0">
+            <div class="flex items-center justify-between gap-3">
+            <span class="min-w-0 text-dark">${esc(e.name)}</span>
             <span class="flex items-center gap-3">
               <span class="font-medium text-dark">${fmt(e.amount)}</span>
               <button data-action="edit-essential" data-id="${
@@ -1288,6 +1422,13 @@
                 e.id
               }" class="text-xs font-medium text-red-600 hover:underline">Remove</button>
             </span>
+            </div>
+            ${
+              e.note
+                ? `<p class="mt-0.5 text-xs text-body-color">${esc(e.note)}</p>`
+                : ""
+            }
+            ${billFridays(e)}
           </li>`
         )
         .join("");
@@ -1295,6 +1436,32 @@
     $("essential-total").textContent = fmt(
       sum(state.essentials, (e) => e.amount)
     );
+  }
+
+  // A bill's planned Friday payments still to make, each removable.
+  function billFridays(bill) {
+    const due = billPlan(bill, state.billPayments, new Date()).filter(
+      (f) => f.status !== "paid"
+    );
+    if (!due.length) return "";
+    return `<div class="mt-1 flex flex-wrap gap-1">${due
+      .map(
+        (f) =>
+          `<span class="inline-flex items-center gap-1 rounded-full ${
+            f.status === "missed"
+              ? "bg-red-50 text-red-700"
+              : "bg-primary bg-opacity-10 text-primary"
+          } px-2 py-0.5 text-xs font-medium">${fmtFriday(f.date)}: ${fmt(
+            f.amount
+          )}<button data-action="remove-bill-friday" data-id="${
+            bill.id
+          }" data-friday="${
+            f.date
+          }" class="ml-0.5 opacity-70 hover:opacity-100" aria-label="Remove ${esc(
+            bill.name
+          )} payment on ${fmtFriday(f.date)}">&times;</button></span>`
+      )
+      .join("")}</div>`;
   }
 
   function renderPlan() {
@@ -1745,14 +1912,25 @@
       flash("Enter a name and a monthly amount above £0.", true);
       return;
     }
-    const editing = state.essentials.find(
-      (x) => x.id === $("essential-id").value
-    );
-    if (editing) {
-      Object.assign(editing, { name, amount });
+    const note = $("essential-note").value.trim();
+    const friday = $("essential-friday").value;
+    const fridayAmount = toPence($("essential-friday-amount").value);
+    if (friday && !(fridayAmount > 0)) {
+      flash("Enter how much you'll pay on that Friday.", true);
+      return;
+    }
+    let bill = state.essentials.find((x) => x.id === $("essential-id").value);
+    if (bill) {
+      Object.assign(bill, { name, amount, note });
       flash(`${name} updated.`);
     } else {
-      state.essentials.push({ id: newId(), name, amount });
+      bill = { id: newId(), name, amount, note, schedule: {} };
+      state.essentials.push(bill);
+    }
+    if (friday) {
+      bill.schedule = Object.assign({}, bill.schedule, {
+        [friday]: fridayAmount,
+      });
     }
     saveState();
     resetEssentialForm();
@@ -1760,8 +1938,21 @@
     render();
   });
 
+  function essentialFridayOptions() {
+    let friday = nextFriday(new Date());
+    const options = [`<option value="">No Friday payment</option>`];
+    for (let i = 0; i < 8; i++) {
+      options.push(
+        `<option value="${friday}">Pay on ${fmtFriday(friday)}</option>`
+      );
+      friday = addDays(friday, 7);
+    }
+    $("essential-friday").innerHTML = options.join("");
+  }
+
   function resetEssentialForm() {
     $("essential-form").reset();
+    essentialFridayOptions();
     $("essential-id").value = "";
     $("essential-submit").textContent = "Add";
     $("essential-cancel").classList.add("hidden");
@@ -1858,9 +2049,43 @@
         $("essential-id").value = item.id;
         $("essential-name").value = item.name;
         $("essential-amount").value = (item.amount / 100).toFixed(2);
+        $("essential-note").value = item.note || "";
         $("essential-submit").textContent = "Save";
         $("essential-cancel").classList.remove("hidden");
         $("essential-name").focus();
+        break;
+      }
+      case "bill-paid": {
+        const bill = state.essentials.find((x) => x.id === id);
+        const amount = Number(btn.dataset.amount);
+        state.billPayments.push({
+          id: newId(),
+          essentialId: id,
+          friday: btn.dataset.friday,
+          amount,
+          date: todayIso(),
+        });
+        saveState();
+        flash(`Paid ${fmt(amount)} for ${bill.name}.`);
+        render();
+        break;
+      }
+      case "delete-bill-payment": {
+        askConfirm("Undo this payment?", "Undo payment").then((ok) => {
+          if (!ok) return;
+          state.billPayments = state.billPayments.filter((p) => p.id !== id);
+          saveState();
+          render();
+        });
+        break;
+      }
+      case "remove-bill-friday": {
+        const bill = state.essentials.find((x) => x.id === id);
+        const schedule = Object.assign({}, bill.schedule);
+        delete schedule[btn.dataset.friday];
+        bill.schedule = schedule;
+        saveState();
+        render();
         break;
       }
       case "delete-essential": {
@@ -2046,6 +2271,7 @@
   });
 
   renderScheduleForm();
+  essentialFridayOptions();
   render();
   connectCloud();
 })(typeof window !== "undefined" ? window : globalThis);
