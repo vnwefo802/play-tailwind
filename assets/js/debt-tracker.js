@@ -1,0 +1,2126 @@
+// ===== Debt Tracker =====
+// All money is stored as whole pence to avoid rounding errors.
+// Data is saved in this browser only (localStorage).
+
+(function (root) {
+  const STORAGE_KEY = "debtTracker.v1";
+
+  const PAYS_PER_YEAR = {
+    weekly: 52,
+    fortnightly: 26,
+    fourWeekly: 13,
+    monthly: 12,
+  };
+
+  const PAY_INTERVAL_DAYS = { weekly: 7, fortnightly: 14, fourWeekly: 28 };
+
+  const MAX_MONTHS = 600;
+
+  // ===== Calculations (no DOM) =====
+
+  function toPence(value) {
+    const n = parseFloat(String(value).replace(/[£,\s]/g, ""));
+    return Number.isFinite(n) ? Math.round(n * 100) : NaN;
+  }
+
+  function sum(list, pick) {
+    return list.reduce((total, item) => total + pick(item), 0);
+  }
+
+  function paidOn(state, debtId) {
+    return sum(
+      state.payments.filter((p) => p.debtId === debtId),
+      (p) => p.amount
+    );
+  }
+
+  function remainingOn(state, debt) {
+    return Math.max(debt.amount - paidOn(state, debt.id), 0);
+  }
+
+  function toMonthly(amount, frequency) {
+    return Math.round((amount * PAYS_PER_YEAR[frequency]) / 12);
+  }
+
+  function perPayday(monthlyAmount, frequency) {
+    return Math.round((monthlyAmount * 12) / PAYS_PER_YEAR[frequency]);
+  }
+
+  // "smallest": smallest balance first. "due": earliest pay-off deadline
+  // first (debts with no deadline go last).
+  function orderDebts(debts, strategy) {
+    return debts.slice().sort((a, b) => {
+      if (strategy === "due" && (a.deadline || "") !== (b.deadline || "")) {
+        if (!a.deadline) return 1;
+        if (!b.deadline) return -1;
+        return a.deadline < b.deadline ? -1 : 1;
+      }
+      return a.balance - b.balance;
+    });
+  }
+
+  // Money goes to the top debt in the order until it's cleared, then the next.
+  function allocate(debts, budget, strategy) {
+    const ordered = orderDebts(
+      debts.filter((d) => d.balance > 0),
+      strategy
+    );
+    const result = {};
+    let left = budget;
+
+    ordered.forEach((d) => {
+      const pay = Math.min(d.balance, left);
+      result[d.id] = pay;
+      left -= pay;
+    });
+
+    return { allocation: result, unused: left };
+  }
+
+  function buildPlan(state) {
+    const { pay, essentials, plan } = state;
+    const monthlyIncome = pay.amount ? toMonthly(pay.amount, pay.frequency) : 0;
+    const essentialsTotal = sum(
+      essentials.filter((e) => !essentialDone(e)),
+      (e) => e.amount
+    );
+    const leftover = monthlyIncome - essentialsTotal;
+    const buffer = Math.round(
+      (Math.max(leftover, 0) * plan.bufferPercent) / 100
+    );
+    const debtBudget = Math.max(leftover - buffer, 0);
+
+    const debts = state.debts.map((d) => ({
+      id: d.id,
+      name: d.name,
+      deadline: d.deadline || "",
+      balance: remainingOn(state, d),
+    }));
+
+    const { allocation, unused } = allocate(debts, debtBudget, plan.strategy);
+
+    return {
+      monthlyIncome,
+      essentialsTotal,
+      leftover,
+      buffer,
+      debtBudget,
+      allocation,
+      unused,
+      order: orderDebts(
+        debts.filter((d) => d.balance > 0),
+        plan.strategy
+      ).map((d) => d.id),
+      forecast: forecast(debts, debtBudget, plan.strategy),
+    };
+  }
+
+  // Month-by-month simulation of the plan (no interest).
+  function forecast(debts, budget, strategy) {
+    let balances = debts
+      .filter((d) => d.balance > 0)
+      .map((d) => Object.assign({}, d));
+    const payoffMonth = {};
+
+    if (balances.length === 0) {
+      return { months: 0, payoffMonth, possible: true };
+    }
+    if (budget <= 0) {
+      return { months: null, payoffMonth, possible: false };
+    }
+
+    for (let month = 1; month <= MAX_MONTHS; month++) {
+      const { allocation } = allocate(balances, budget, strategy);
+      balances.forEach((d) => {
+        d.balance -= allocation[d.id] || 0;
+        if (d.balance <= 0 && !payoffMonth[d.id]) payoffMonth[d.id] = month;
+      });
+      balances = balances.filter((d) => d.balance > 0);
+
+      if (balances.length === 0) {
+        return { months: month, payoffMonth, possible: true };
+      }
+    }
+    return { months: null, payoffMonth, possible: false };
+  }
+
+  function addMonths(date, months) {
+    return new Date(date.getFullYear(), date.getMonth() + months, 1);
+  }
+
+  function startOfDay(date) {
+    return new Date(date.getFullYear(), date.getMonth(), date.getDate());
+  }
+
+  function parseDate(iso) {
+    if (!iso) return null;
+    const [y, m, d] = iso.split("-").map(Number);
+    return new Date(y, m - 1, d);
+  }
+
+  function daysBetween(from, to) {
+    return Math.round((startOfDay(to) - startOfDay(from)) / 86400000);
+  }
+
+  // Roll a past payday forward to the next one on or after today.
+  function nextPayday(iso, frequency, today) {
+    let date = parseDate(iso);
+    if (!date) return null;
+    today = startOfDay(today);
+    let guard = 0;
+    while (date < today && guard++ < 1000) {
+      date =
+        frequency === "monthly"
+          ? new Date(date.getFullYear(), date.getMonth() + 1, date.getDate())
+          : new Date(
+              date.getFullYear(),
+              date.getMonth(),
+              date.getDate() + PAY_INTERVAL_DAYS[frequency]
+            );
+    }
+    return date;
+  }
+
+  function toIso(date) {
+    const pad = (n) => String(n).padStart(2, "0");
+    return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(
+      date.getDate()
+    )}`;
+  }
+
+  function addDays(iso, days) {
+    const d = parseDate(iso);
+    return toIso(new Date(d.getFullYear(), d.getMonth(), d.getDate() + days));
+  }
+
+  // "2026-11" -> every Friday in that month as ISO dates.
+  function fridaysInMonth(month) {
+    const [y, m] = month.split("-").map(Number);
+    const days = [];
+    for (let d = new Date(y, m - 1, 1); d.getMonth() === m - 1; ) {
+      if (d.getDay() === 5) days.push(toIso(d));
+      d = new Date(d.getFullYear(), d.getMonth(), d.getDate() + 1);
+    }
+    return days;
+  }
+
+  // A Friday payment belongs to the Monday-Sunday week around that Friday.
+  // Each planned Friday is "paid" once a payment has been logged against it,
+  // "missed" once its week is over, "thisWeek" during its week, else "later".
+  function fridayPlan(debt, payments, today) {
+    const now = toIso(today);
+    return Object.keys(debt.schedule || {})
+      .sort()
+      .map((date) => {
+        const paid = payments.some(
+          (p) => p.debtId === debt.id && p.forFriday === date
+        );
+        let status = "later";
+        if (paid) status = "paid";
+        else if (now > addDays(date, 2)) status = "missed";
+        else if (now >= addDays(date, -4)) status = "thisWeek";
+        return { date, amount: debt.schedule[date], status };
+      });
+  }
+
+  // The planned Friday a new payment should count towards: the earliest
+  // unpaid one whose week has started by the payment date.
+  function fridayForPayment(debt, payments, paymentDate) {
+    const due = fridayPlan(debt, payments, parseDate(paymentDate)).find(
+      (f) => f.status === "missed" || f.status === "thisWeek"
+    );
+    return due ? { date: due.date, missed: due.status === "missed" } : null;
+  }
+
+  // The Friday of the Monday-Sunday week that contains `date`.
+  function weekFriday(date) {
+    const d = typeof date === "string" ? parseDate(date) : date;
+    const mondayBased = (d.getDay() + 6) % 7;
+    return toIso(
+      new Date(d.getFullYear(), d.getMonth(), d.getDate() + 4 - mondayBased)
+    );
+  }
+
+  // The next payday from `today`: this week's Friday unless it has passed.
+  function nextFriday(today) {
+    const friday = weekFriday(today);
+    return friday < toIso(today) ? addDays(friday, 7) : friday;
+  }
+
+  // Whether the payment for a given Friday has been made: one logged against
+  // it, or (with no plan for that Friday) any payment in its week.
+  function fridayPaid(debt, payments, friday) {
+    return payments.some(
+      (p) =>
+        p.debtId === debt.id &&
+        (p.forFriday === friday ||
+          (!p.forFriday &&
+            p.date >= addDays(friday, -4) &&
+            p.date <= addDays(friday, 2)))
+    );
+  }
+
+  // What is set to be paid on a Friday: its planned amount, else the weekly
+  // amount, or nothing once that Friday has been paid.
+  function fridayAmount(debt, payments, friday) {
+    if (fridayPaid(debt, payments, friday)) return 0;
+    const planned = (debt.schedule || {})[friday];
+    return planned !== undefined ? planned : debt.weekly || 0;
+  }
+
+  // Walk the Fridays from the next payday on, paying the planned or weekly amounts,
+  // to see when the debt is cleared. `finish` is null if the plan runs out.
+  function projection(debt, remaining, payments, today) {
+    const plannedDates = Object.keys(debt.schedule || {}).sort();
+    const lastPlanned = plannedDates[plannedDates.length - 1] || "";
+    let friday = nextFriday(today);
+    let covered = 0;
+    for (let week = 0; week < 520; week++) {
+      if (!debt.weekly && friday > lastPlanned) break;
+      covered += Math.min(
+        fridayAmount(debt, payments, friday),
+        remaining - covered
+      );
+      if (covered >= remaining) return { finish: friday, covered };
+      friday = addDays(friday, 7);
+    }
+    return { finish: null, covered };
+  }
+
+  // Where a debt stands against its weekly amount, Friday plan and pay-off
+  // deadline (all optional).
+  function planStatus(debt, remaining, payments, today) {
+    const hasPlan =
+      debt.weekly > 0 || Object.keys(debt.schedule || {}).length > 0;
+    if (remaining <= 0 || (!hasPlan && !debt.deadline)) return null;
+    if (debt.deadline && debt.deadline < toIso(today)) return { kind: "late" };
+    let fridays = 0;
+    if (debt.deadline) {
+      for (let f = nextFriday(today); f <= debt.deadline; f = addDays(f, 7)) {
+        fridays++;
+      }
+    }
+    const needed = Math.ceil(remaining / Math.max(fridays, 1));
+    if (!hasPlan) return { kind: "needed", needed };
+    const { finish, covered } = projection(debt, remaining, payments, today);
+    if (!finish) {
+      return debt.deadline
+        ? { kind: "behind", needed }
+        : { kind: "short", covered };
+    }
+    if (!debt.deadline) return { kind: "estimate", finish };
+    return finish <= debt.deadline
+      ? { kind: "onTrack", finish }
+      : { kind: "behind", needed };
+  }
+
+  // Everything to pay on the coming payday (this week's Friday, or next
+  // week's at the weekend), plus missed planned Fridays still unpaid.
+  function paydayItems(debts, payments, today) {
+    const payday = nextFriday(today);
+    const items = [];
+    debts.forEach((debt) => {
+      let left =
+        debt.amount -
+        sum(
+          payments.filter((p) => p.debtId === debt.id),
+          (p) => p.amount
+        );
+      if (left <= 0) return;
+      fridayPlan(debt, payments, today)
+        .filter(
+          (f) =>
+            f.status === "missed" ||
+            (f.status === "thisWeek" && f.date !== payday)
+        )
+        .forEach((f) => {
+          const amount = Math.min(f.amount, left);
+          left -= amount;
+          if (amount > 0) {
+            items.push({
+              debtId: debt.id,
+              friday: f.date,
+              amount,
+              missed: f.status === "missed",
+            });
+          }
+        });
+      const amount = Math.min(fridayAmount(debt, payments, payday), left);
+      if (amount > 0) {
+        items.push({ debtId: debt.id, friday: payday, amount, missed: false });
+      }
+    });
+    return { payday, items };
+  }
+
+  // "Klarna – Trip.com" when a debt says what it was for, else just "Klarna".
+  function debtLabel(d) {
+    return d.item ? `${d.name} – ${d.item}` : d.name;
+  }
+
+  // Debts grouped by who is owed (same name, ignoring case and spaces),
+  // in the order each person first appears.
+  function groupDebts(debts) {
+    const groups = new Map();
+    debts.forEach((d) => {
+      const key = d.name.trim().toLowerCase();
+      if (!groups.has(key)) groups.set(key, { name: d.name.trim(), debts: [] });
+      groups.get(key).debts.push(d);
+    });
+    return [...groups.values()];
+  }
+
+  // Bring saved data up to date: older strategies fall back to smallest
+  // first, and names saved as "Klarna – Trip.com" split into who and what.
+  function normalizeState(st) {
+    if (!["smallest", "due"].includes(st.plan.strategy)) {
+      st.plan.strategy = "smallest";
+    }
+    st.debts.forEach((d) => {
+      const parts = d.item ? null : d.name.split(" – ");
+      if (parts && parts.length === 2 && parts[0].trim() && parts[1].trim()) {
+        d.name = parts[0].trim();
+        d.item = parts[1].trim();
+      }
+    });
+    return st;
+  }
+
+  // What's left per person for the chart, in the order people were added.
+  // Each keeps a fixed colour slot (its place among everyone ever added),
+  // so paying someone off never repaints the others. Past the 7th person
+  // the rest share an "Everyone else" slice.
+  function leftByPerson(debts, payments) {
+    const slices = groupDebts(debts).map((group, slot) => ({
+      name: group.name,
+      slot,
+      left: sum(group.debts, (d) =>
+        Math.max(
+          d.amount -
+            sum(
+              payments.filter((p) => p.debtId === d.id),
+              (p) => p.amount
+            ),
+          0
+        )
+      ),
+    }));
+    const owing = slices.filter((s) => s.left > 0);
+    if (owing.length <= 8) return owing;
+    const rest = owing.slice(7);
+    return owing.slice(0, 7).concat({
+      name: `Everyone else (${rest.length})`,
+      slot: 7,
+      left: sum(rest, (s) => s.left),
+    });
+  }
+
+  // When everything will be paid off. Uses each debt's Friday plan or
+  // weekly amount when every debt left has one (the last Friday any of them
+  // is cleared); otherwise the budget plan from take-home pay, to the month.
+  function debtFreeDate(state, today) {
+    const owing = state.debts
+      .map((d) => ({ d, left: remainingOn(state, d) }))
+      .filter((x) => x.left > 0);
+    if (owing.length === 0) return { kind: "done" };
+    const finishes = owing.map(
+      (x) => projection(x.d, x.left, state.payments, today).finish
+    );
+    if (finishes.every(Boolean)) {
+      return {
+        kind: "date",
+        date: finishes.sort()[finishes.length - 1],
+        source: "fridays",
+      };
+    }
+    if (state.pay && state.pay.amount) {
+      const f = buildPlan(state).forecast;
+      if (f.possible && f.months) {
+        // The payday in the month the plan clears everything, or that
+        // month's last day when no payday is set.
+        const payday = nextPayday(
+          state.pay.nextPayDate,
+          state.pay.frequency,
+          today
+        );
+        const date = payday
+          ? new Date(
+              payday.getFullYear(),
+              payday.getMonth() + f.months - 1,
+              payday.getDate()
+            )
+          : new Date(today.getFullYear(), today.getMonth() + f.months, 0);
+        return { kind: "month", date: toIso(date), source: "budget" };
+      }
+    }
+    return {
+      kind: "unknown",
+      missing: owing.filter((x, i) => !finishes[i]).map((x) => debtLabel(x.d)),
+    };
+  }
+
+  // Whole years, months, weeks and days from today until `iso`.
+  function countdown(today, iso) {
+    const end = parseDate(iso);
+    let months =
+      (end.getFullYear() - today.getFullYear()) * 12 +
+      end.getMonth() -
+      today.getMonth();
+    if (end.getDate() < today.getDate()) months--;
+    months = Math.max(months, 0);
+    const afterMonths = new Date(
+      today.getFullYear(),
+      today.getMonth() + months,
+      today.getDate()
+    );
+    const days = Math.max(daysBetween(afterMonths, end), 0);
+    return {
+      years: Math.floor(months / 12),
+      months: months % 12,
+      weeks: Math.floor(days / 7),
+      days: days % 7,
+      totalDays: Math.max(daysBetween(today, end), 0),
+    };
+  }
+
+  // Some essentials are paid off over time (a glasses plan, a water bill
+  // balance): they carry a `total` and how much is `paid`. Once paid off
+  // they stop counting towards the monthly essentials.
+  function essentialLeft(e) {
+    return e.total ? Math.max(e.total - (e.paid || 0), 0) : null;
+  }
+
+  function essentialDone(e) {
+    return Boolean(e.total) && essentialLeft(e) === 0;
+  }
+
+  const calc = {
+    toPence,
+    paidOn,
+    remainingOn,
+    toMonthly,
+    perPayday,
+    orderDebts,
+    allocate,
+    buildPlan,
+    forecast,
+    nextPayday,
+    weekFriday,
+    fridayPaid,
+    projection,
+    planStatus,
+    paydayItems,
+    debtLabel,
+    groupDebts,
+    normalizeState,
+    leftByPerson,
+    debtFreeDate,
+    countdown,
+    essentialLeft,
+    essentialDone,
+    fridaysInMonth,
+    fridayPlan,
+    fridayForPayment,
+    daysBetween,
+    parseDate,
+  };
+
+  if (typeof module !== "undefined" && module.exports) {
+    module.exports = calc;
+    return;
+  }
+
+  // ===== State =====
+
+  function emptyState() {
+    return {
+      version: 1,
+      pay: { amount: 0, frequency: "monthly", nextPayDate: "" },
+      essentials: [],
+      debts: [],
+      payments: [],
+      plan: { strategy: "smallest", bufferPercent: 10 },
+    };
+  }
+
+  function loadState() {
+    try {
+      const raw = root.localStorage.getItem(STORAGE_KEY);
+      if (!raw) return emptyState();
+      return normalizeState(Object.assign(emptyState(), JSON.parse(raw)));
+    } catch (e) {
+      return emptyState();
+    }
+  }
+
+  let storageWorks = true;
+
+  function saveState() {
+    try {
+      root.localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+      storageWorks = true;
+    } catch (e) {
+      storageWorks = false;
+    }
+    pushToCloud();
+  }
+
+  function newId() {
+    return Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
+  }
+
+  let state = loadState();
+
+  // ===== Formatting =====
+
+  const money = new Intl.NumberFormat("en-GB", {
+    style: "currency",
+    currency: "GBP",
+  });
+
+  function fmt(pence) {
+    return money.format(pence / 100);
+  }
+
+  function fmtDate(date) {
+    return date.toLocaleDateString("en-GB", {
+      day: "numeric",
+      month: "short",
+      year: "numeric",
+    });
+  }
+
+  function fmtMonth(date) {
+    return date.toLocaleDateString("en-GB", { month: "long", year: "numeric" });
+  }
+
+  function esc(text) {
+    return String(text == null ? "" : text)
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;")
+      .replace(/'/g, "&#39;");
+  }
+
+  function todayIso() {
+    const d = new Date();
+    const pad = (n) => String(n).padStart(2, "0");
+    return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+  }
+
+  const $ = (id) => document.getElementById(id);
+
+  function flash(message, isError) {
+    const el = $("flash");
+    el.textContent = message;
+    el.className =
+      "fixed bottom-6 left-1/2 z-50 -translate-x-1/2 rounded-lg px-6 py-3 text-sm font-medium text-white shadow-lg " +
+      (isError ? "bg-red-600" : "bg-secondary");
+    clearTimeout(flash.timer);
+    flash.timer = setTimeout(() => el.classList.add("hidden"), 3000);
+  }
+
+  // ===== Rendering =====
+
+  function render() {
+    renderSummary();
+    renderCharts();
+    renderCountdown();
+    renderPayday();
+    renderDebts();
+    renderPaymentForm();
+    renderPayments();
+    renderDueDates();
+    renderPayForm();
+    renderEssentials();
+    renderPlan();
+    $("storage-warning").classList.toggle(
+      "hidden",
+      storageWorks || Boolean(cloudDoc)
+    );
+  }
+
+  // ===== Charts =====
+
+  // Fixed categorical order (validated palette); slot = person's place.
+  const SERIES = [
+    "#2a78d6",
+    "#eb6834",
+    "#1baf7a",
+    "#eda100",
+    "#e87ba4",
+    "#008300",
+    "#6250d6",
+    "#e34948",
+  ];
+  const PAID = "#13C296";
+  const TRACK = "#E5E7EB";
+  const SURFACE = "#FFFFFF";
+
+  // A ring segment from fraction f0 to f1 of the way round, clockwise from
+  // the top, between radii 62 and 90 of a 200x200 box.
+  function ringPath(f0, f1) {
+    const point = (f, r) => {
+      const a = 2 * Math.PI * f - Math.PI / 2;
+      return `${(100 + r * Math.cos(a)).toFixed(2)} ${(
+        100 +
+        r * Math.sin(a)
+      ).toFixed(2)}`;
+    };
+    const large = f1 - f0 > 0.5 ? 1 : 0;
+    return `M ${point(f0, 90)} A 90 90 0 ${large} 1 ${point(f1, 90)} L ${point(
+      f1,
+      62
+    )} A 62 62 0 ${large} 0 ${point(f0, 62)} Z`;
+  }
+
+  // Slices as [{value, color, label}]; a 2px surface gap separates them.
+  function ringSvg(slices) {
+    const total = sum(slices, (s) => s.value);
+    if (!total) return "";
+    const whole = slices.filter((s) => s.value > 0);
+    if (whole.length === 1) {
+      return `<circle cx="100" cy="100" r="76" fill="none" stroke="${
+        whole[0].color
+      }" stroke-width="28"><title>${esc(whole[0].label)}</title></circle>`;
+    }
+    let at = 0;
+    return whole
+      .map((s) => {
+        const f0 = at / total;
+        at += s.value;
+        return `<path d="${ringPath(f0, at / total)}" fill="${
+          s.color
+        }" stroke="${SURFACE}" stroke-width="2" stroke-linejoin="round"><title>${esc(
+          s.label
+        )}</title></path>`;
+      })
+      .join("");
+  }
+
+  function legendRow(color, name, amount, note) {
+    return `
+      <li class="flex items-center gap-2">
+        <span class="h-3 w-3 shrink-0 rounded-sm" style="background:${color}"></span>
+        <span class="min-w-0 flex-1 truncate text-dark">${esc(name)}</span>
+        <span class="font-semibold tabular-nums text-dark">${fmt(amount)}</span>
+        ${
+          note
+            ? `<span class="w-10 text-right text-xs tabular-nums text-body-color">${note}</span>`
+            : ""
+        }
+      </li>`;
+  }
+
+  function renderCharts() {
+    const owed = sum(state.debts, (d) => d.amount);
+    $("sum-charts").classList.toggle("hidden", owed === 0);
+    if (!owed) return;
+    const left = sum(state.debts, (d) => remainingOn(state, d));
+    const paid = owed - left;
+    const pct = (n) => `${Math.round((n / owed) * 100)}%`;
+
+    $("chart-left").innerHTML = ringSvg([
+      { value: paid, color: PAID, label: `Paid: ${fmt(paid)} (${pct(paid)})` },
+      {
+        value: left,
+        color: TRACK,
+        label: `Still to pay: ${fmt(left)} (${pct(left)})`,
+      },
+    ]);
+    $("chart-left").setAttribute(
+      "aria-label",
+      `${fmt(left)} still to pay of ${fmt(owed)}`
+    );
+    // Keep long amounts inside the ring's hole.
+    const amount = fmt(left);
+    $("chart-left-amount").textContent = amount;
+    $("chart-left-amount").className = `font-bold text-dark ${
+      amount.length <= 9
+        ? "text-2xl"
+        : amount.length <= 10
+        ? "text-xl"
+        : "text-lg"
+    }`;
+    $("chart-left-pct").textContent = `${pct(paid)} paid`;
+    $("chart-left-legend").innerHTML =
+      legendRow(PAID, "Paid", paid, pct(paid)) +
+      legendRow(TRACK, "Still to pay", left, pct(left));
+
+    const people = leftByPerson(state.debts, state.payments);
+    const share = (n) => `${Math.round((n / left) * 100)}%`;
+    $("chart-people").innerHTML = people.length
+      ? ringSvg(
+          people.map((p) => ({
+            value: p.left,
+            color: SERIES[p.slot % SERIES.length],
+            label: `${p.name}: ${fmt(p.left)} left (${share(p.left)})`,
+          }))
+        )
+      : `<circle cx="100" cy="100" r="76" fill="none" stroke="${PAID}" stroke-width="28"></circle>`;
+    $("chart-people").setAttribute(
+      "aria-label",
+      people.map((p) => `${p.name} ${fmt(p.left)}`).join(", ") ||
+        "Everything is paid off"
+    );
+    $("chart-people-count").textContent = people.length;
+    $("chart-people-label").textContent =
+      people.length === 1 ? "person left" : "people left";
+    $("chart-people-legend").innerHTML = people.length
+      ? people
+          .map((p) =>
+            legendRow(
+              SERIES[p.slot % SERIES.length],
+              p.name,
+              p.left,
+              share(p.left)
+            )
+          )
+          .join("")
+      : `<li class="text-secondary font-medium">Everything is paid off.</li>`;
+  }
+
+  function renderCountdown() {
+    const today = new Date();
+    const result = debtFreeDate(state, today);
+    $("countdown").classList.toggle("hidden", state.debts.length === 0);
+    const unit = (n, one, many) => `
+      <div>
+        <p class="text-4xl font-bold leading-none tabular-nums">${n}</p>
+        <p class="mt-1 text-sm opacity-80">${n === 1 ? one : many}</p>
+      </div>`;
+
+    if (result.kind === "done") {
+      $("countdown-when").textContent = "You're debt-free!";
+      $("countdown-units").innerHTML = "";
+      $("countdown-note").textContent = "Every debt is paid off. Well done.";
+      return;
+    }
+    if (result.kind === "unknown") {
+      $("countdown-when").textContent = "Not worked out yet";
+      $("countdown-units").innerHTML = "";
+      $(
+        "countdown-note"
+      ).textContent = `Add a weekly amount or Friday plan to ${result.missing.join(
+        ", "
+      )}, or enter your take-home pay, to see your date.`;
+      return;
+    }
+    const end = parseDate(result.date);
+    $("countdown-when").textContent = end.toLocaleDateString("en-GB", {
+      month: "long",
+      year: "numeric",
+    });
+    const c = countdown(today, result.date);
+    const parts =
+      c.totalDays === 0
+        ? []
+        : c.years > 0
+        ? [unit(c.years, "year", "years"), unit(c.months, "month", "months")]
+        : c.months > 0
+        ? [unit(c.months, "month", "months"), unit(c.weeks, "week", "weeks")]
+        : c.weeks > 0
+        ? [unit(c.weeks, "week", "weeks"), unit(c.days, "day", "days")]
+        : [unit(c.days, "day", "days")];
+    $("countdown-units").innerHTML = parts.join("");
+    $("countdown-note").textContent =
+      c.totalDays === 0
+        ? "That's today. One last payment to go."
+        : result.source === "fridays"
+        ? `Last payment on ${fmtFriday(
+            result.date
+          )} ${end.getFullYear()}, going by your Friday plans and weekly amounts.`
+        : "Going by your budget plan. Add weekly amounts to your debts for an exact Friday.";
+  }
+
+  function renderPayday() {
+    const { payday, items } = paydayItems(
+      state.debts,
+      state.payments,
+      new Date()
+    );
+    $("payday").classList.toggle("hidden", items.length === 0);
+    if (items.length === 0) return;
+    const names = Object.fromEntries(
+      state.debts.map((d) => [d.id, debtLabel(d)])
+    );
+    $("payday-date").textContent =
+      payday === todayIso() ? "Today is payday" : fmtFriday(payday);
+    $("payday-list").innerHTML = items
+      .map(
+        (item) => `
+        <li class="flex flex-wrap items-center justify-between gap-2 border-t border-gray-100 py-3 first:border-t-0">
+          <span>
+            <span class="font-medium text-dark">${esc(
+              names[item.debtId]
+            )}</span>
+            ${
+              item.missed
+                ? `<span class="ml-1 whitespace-nowrap rounded-full bg-red-600 px-2 py-0.5 text-xs font-medium text-white">Missed ${fmtFriday(
+                    item.friday
+                  )}</span>`
+                : item.friday !== payday
+                ? `<span class="ml-1 whitespace-nowrap rounded-full bg-warning px-2 py-0.5 text-xs font-medium text-dark">From ${fmtFriday(
+                    item.friday
+                  )}</span>`
+                : ""
+            }
+          </span>
+          <span class="flex items-center gap-3">
+            <span class="font-semibold text-dark">${fmt(item.amount)}</span>
+            <button data-action="payday-paid" data-id="${
+              item.debtId
+            }" data-friday="${item.friday}" data-amount="${
+          item.amount
+        }" data-missed="${
+          item.missed ? 1 : ""
+        }" class="rounded-lg bg-secondary px-3 py-1 text-sm font-medium text-white hover:bg-opacity-90">Mark paid</button>
+          </span>
+        </li>`
+      )
+      .join("");
+    $("payday-total").textContent = fmt(sum(items, (i) => i.amount));
+  }
+
+  function renderSummary() {
+    const total = sum(state.debts, (d) => d.amount);
+    const paid = sum(state.debts, (d) => paidOn(state, d.id));
+    const left = sum(state.debts, (d) => remainingOn(state, d));
+    const cleared = state.debts.filter(
+      (d) => remainingOn(state, d) === 0
+    ).length;
+    const pct = total ? Math.round((paid / total) * 100) : 0;
+
+    $("sum-total").textContent = fmt(total);
+    $("sum-paid").textContent = fmt(paid);
+    $("sum-left").textContent = fmt(left);
+    $("sum-cleared").textContent = `${cleared} of ${state.debts.length}`;
+    $("sum-bar").style.width = pct + "%";
+    $("sum-pct").textContent = `${pct}% paid off`;
+  }
+
+  function renderDebts() {
+    const list = $("debt-list");
+    if (state.debts.length === 0) {
+      list.innerHTML = `<p class="rounded-lg border border-dashed border-gray-300 p-6 text-center text-body-color">No debts yet. Add who you owe above.</p>`;
+      return;
+    }
+
+    const totals = (debts) => ({
+      left: sum(debts, (d) => remainingOn(state, d)),
+      owed: sum(debts, (d) => d.amount),
+    });
+
+    const groups = groupDebts(state.debts).map((group) => {
+      if (group.debts.length === 1) return debtCard(group.debts[0], false);
+      const t = totals(group.debts);
+      return `
+        <section class="space-y-3 rounded-xl border border-gray-200 bg-gray-50 p-3">
+          <div class="flex flex-wrap items-start justify-between gap-2 px-2 pt-1">
+            <h3 class="text-lg font-bold text-dark">${esc(group.name)}
+              <span class="text-sm font-normal text-body-color">· ${
+                group.debts.length
+              } debts</span></h3>
+            <div class="text-right">
+              <p class="text-xl font-bold ${
+                t.left === 0 ? "text-secondary" : "text-dark"
+              }">${fmt(t.left)}</p>
+              <p class="text-xs text-body-color">left of ${fmt(
+                t.owed
+              )} in total</p>
+            </div>
+          </div>
+          ${group.debts.map((d) => debtCard(d, true)).join("")}
+        </section>`;
+    });
+
+    const all = totals(state.debts);
+    list.innerHTML =
+      groups.join("") +
+      `
+      <div class="flex flex-wrap items-center justify-between gap-2 rounded-xl bg-dark px-5 py-4 text-white">
+        <span class="font-semibold">Total for everyone</span>
+        <span class="text-right">
+          <span class="block text-xl font-bold">${fmt(all.left)}</span>
+          <span class="block text-xs opacity-80">left of ${fmt(
+            all.owed
+          )} owed</span>
+        </span>
+      </div>`;
+  }
+
+  // One debt. Inside a person's group the card is titled by what it was for.
+  function debtCard(d, inGroup) {
+    const title = inGroup ? d.item || d.name : debtLabel(d);
+
+    const paid = paidOn(state, d.id);
+    const left = remainingOn(state, d);
+    const pct = d.amount
+      ? Math.min(Math.round((paid / d.amount) * 100), 100)
+      : 0;
+    const done = left === 0;
+    const details = [
+      d.weekly ? `${fmt(d.weekly)}/week` : "",
+      d.deadline ? `pay off by ${fmtDate(parseDate(d.deadline))}` : "",
+    ]
+      .filter(Boolean)
+      .join(" · ");
+
+    return `
+        <div class="rounded-lg border ${
+          done
+            ? "border-secondary bg-secondary bg-opacity-5"
+            : "border-gray-200 bg-white"
+        } p-5">
+          <div class="flex flex-wrap items-start justify-between gap-2">
+            <div>
+              <h4 class="text-lg font-semibold text-dark">${esc(title)} ${
+      done
+        ? '<span class="ml-2 rounded-full bg-secondary px-2 py-0.5 text-xs font-medium text-white">Paid off</span>'
+        : ""
+    }</h4>
+              ${
+                details
+                  ? `<p class="text-sm text-body-color">${esc(details)}</p>`
+                  : ""
+              }
+              ${renderWeeklyStatus(d, left)}
+              ${done ? "" : renderNextFriday(d)}
+              ${
+                d.notes
+                  ? `<p class="mt-1 text-sm italic text-body-color">${esc(
+                      d.notes
+                    )}</p>`
+                  : ""
+              }
+            </div>
+            <div class="text-right">
+              <p class="text-xl font-bold ${
+                done ? "text-secondary" : "text-dark"
+              }">${fmt(left)}</p>
+              <p class="text-xs text-body-color">left of ${fmt(d.amount)}</p>
+            </div>
+          </div>
+          <div class="mt-3 h-2 w-full overflow-hidden rounded-full bg-gray-200">
+            <div class="h-full rounded-full bg-secondary" style="width:${pct}%"></div>
+          </div>
+          <div class="mt-3 flex flex-wrap items-center justify-between gap-2 text-sm">
+            <span class="text-body-color">${fmt(paid)} paid (${pct}%)</span>
+            <span class="flex gap-3">
+              ${
+                done
+                  ? ""
+                  : `<button data-action="pay" data-id="${d.id}" class="font-medium text-primary hover:underline">Make payment</button>`
+              }
+              <button data-action="edit-debt" data-id="${
+                d.id
+              }" class="font-medium text-body-color hover:text-dark hover:underline">Edit</button>
+              <button data-action="delete-debt" data-id="${
+                d.id
+              }" class="font-medium text-red-600 hover:underline">Delete</button>
+            </span>
+          </div>
+        </div>`;
+  }
+
+  function renderWeeklyStatus(d, left) {
+    const status = planStatus(d, left, state.payments, new Date());
+    if (!status) return "";
+    const by = d.deadline ? fmtDate(parseDate(d.deadline)) : "";
+    const lines = {
+      late: ["text-red-600", "The pay-off deadline has passed"],
+      onTrack: [
+        "text-secondary",
+        `On track: paid off by ${status.finish && fmtFriday(status.finish)}`,
+      ],
+      behind: [
+        "text-yellow-700",
+        `Behind: pay ${fmt(status.needed)} each Friday to finish by ${by}`,
+      ],
+      estimate: [
+        "text-body-color",
+        `Paid off by ${status.finish && fmtFriday(status.finish)} at this rate`,
+      ],
+      needed: [
+        "text-body-color",
+        `${fmt(status.needed)} each Friday would finish it by ${by}`,
+      ],
+      short: [
+        "text-yellow-700",
+        `Your plan covers ${fmt(status.covered)}: ${fmt(
+          left - status.covered
+        )} still to plan`,
+      ],
+    };
+    const [colour, text] = lines[status.kind];
+    return `<p class="mt-1 text-sm font-medium ${colour}">${esc(text)}</p>`;
+  }
+
+  function renderNextFriday(d) {
+    const next = fridayPlan(d, state.payments, new Date()).find(
+      (f) => f.status !== "paid"
+    );
+    if (!next) return "";
+    const when = fmtFriday(next.date);
+    const [colour, text] =
+      next.status === "missed"
+        ? [
+            "text-red-600",
+            `Missed Friday payment: ${fmt(next.amount)} on ${when}`,
+          ]
+        : next.date === todayIso()
+        ? ["text-primary", `Payday today: pay ${fmt(next.amount)}`]
+        : [
+            "text-primary",
+            `Next Friday payment: ${fmt(next.amount)} on ${when}`,
+          ];
+    return `<p class="mt-1 text-sm font-medium ${colour}">${esc(text)}</p>`;
+  }
+
+  function fmtFriday(iso) {
+    return parseDate(iso).toLocaleDateString("en-GB", {
+      weekday: "short",
+      day: "numeric",
+      month: "short",
+    });
+  }
+
+  // What to pay now: a missed or this week's Friday amount, else the weekly
+  // amount, never more than is left.
+  function suggestedAmount(debt) {
+    const left = remainingOn(state, debt);
+    const friday = fridayPlan(debt, state.payments, new Date()).find(
+      (f) => f.status === "missed" || f.status === "thisWeek"
+    );
+    const amount = friday ? friday.amount : debt.weekly;
+    return amount ? Math.min(amount, left) : 0;
+  }
+
+  function weeklyPlaceholder() {
+    const debt = state.debts.find((d) => d.id === $("payment-debt").value);
+    const amount = debt ? suggestedAmount(debt) : 0;
+    $("payment-amount").placeholder = amount
+      ? (amount / 100).toFixed(2)
+      : "0.00";
+  }
+
+  function renderPaymentForm() {
+    const select = $("payment-debt");
+    const current = select.value;
+    const open = state.debts.filter((d) => remainingOn(state, d) > 0);
+    select.innerHTML = open.length
+      ? open
+          .map(
+            (d) =>
+              `<option value="${d.id}">${esc(debtLabel(d))} (${fmt(
+                remainingOn(state, d)
+              )} left)</option>`
+          )
+          .join("")
+      : `<option value="">No debts to pay</option>`;
+    if (open.some((d) => d.id === current)) select.value = current;
+    $("payment-submit").disabled = open.length === 0;
+    weeklyPlaceholder();
+    if (!$("payment-date").value) $("payment-date").value = todayIso();
+  }
+
+  function paymentLabel(p) {
+    if (p.forFriday) {
+      return p.missed
+        ? "Paid off overdue"
+        : `Friday payment ${fmtFriday(p.forFriday)}`;
+    }
+    // Payments logged before the Friday plan existed.
+    if (p.clearedDueDate) {
+      return p.clearedDueDate < p.date
+        ? "Paid off overdue"
+        : "Paid on due date";
+    }
+    return "";
+  }
+
+  function renderPayments() {
+    const list = $("payment-list");
+    const names = Object.fromEntries(
+      state.debts.map((d) => [d.id, debtLabel(d)])
+    );
+    const payments = state.payments
+      .slice()
+      .sort((a, b) => (a.date < b.date ? 1 : a.date > b.date ? -1 : 0));
+
+    if (payments.length === 0) {
+      list.innerHTML = `<tr><td colspan="4" class="py-4 text-center text-body-color">No payments logged yet.</td></tr>`;
+      return;
+    }
+
+    list.innerHTML = payments
+      .map(
+        (p) => `
+        <tr class="border-t border-gray-100">
+          <td class="py-2 pr-3 text-body-color">${fmtDate(
+            parseDate(p.date)
+          )}</td>
+          <td class="py-2 pr-3 text-dark">${esc(
+            names[p.debtId] || "Deleted debt"
+          )}${
+          paymentLabel(p)
+            ? ` <span class="ml-1 whitespace-nowrap rounded-full bg-secondary px-2 py-0.5 text-xs font-medium text-white">${paymentLabel(
+                p
+              )}</span>`
+            : ""
+        }${
+          p.note
+            ? `<span class="block text-xs text-body-color">${esc(
+                p.note
+              )}</span>`
+            : ""
+        }</td>
+          <td class="py-2 pr-3 text-right font-medium text-dark">${fmt(
+            p.amount
+          )}</td>
+          <td class="py-2 text-right"><button data-action="delete-payment" data-id="${
+            p.id
+          }" class="text-xs font-medium text-red-600 hover:underline">Undo</button></td>
+        </tr>`
+      )
+      .join("");
+  }
+
+  function renderDueDates() {
+    const list = $("due-list");
+    const today = new Date();
+    const items = [];
+    const pill = (classes, text) =>
+      `<span class="whitespace-nowrap rounded-full px-2 py-0.5 text-xs font-medium ${classes}">${text}</span>`;
+
+    state.debts.forEach((debt) => {
+      const left = remainingOn(state, debt);
+      if (left === 0) return;
+      const plan = fridayPlan(debt, state.payments, today);
+      const upcoming = plan.find(
+        (f) => f.status === "thisWeek" || f.status === "later"
+      );
+      plan
+        .filter((f) => f.status === "missed" || f === upcoming)
+        .forEach((f) => {
+          const days = daysBetween(today, parseDate(f.date));
+          if (f.status === "later" && days > 14) return;
+          let badge = pill("bg-gray-100 text-body-color", `in ${days} days`);
+          if (f.status === "missed")
+            badge = pill("bg-red-600 text-white", "Missed");
+          else if (days === 0)
+            badge = pill("bg-secondary text-white", "Payday today");
+          else if (f.status === "thisWeek")
+            badge = pill(
+              "bg-warning text-dark",
+              days < 0 ? "This week" : "This Friday"
+            );
+          items.push({
+            days,
+            html: `<span><span class="font-medium text-dark">${esc(
+              debtLabel(debt)
+            )}</span> <span class="text-body-color">· pay ${fmt(
+              Math.min(f.amount, left)
+            )} · ${fmtFriday(f.date)}</span></span>${badge}`,
+          });
+        });
+
+      if (debt.deadline) {
+        const days = daysBetween(today, parseDate(debt.deadline));
+        if (days > 30) return;
+        const badge =
+          days < 0
+            ? pill("bg-red-600 text-white", "Deadline passed")
+            : pill(
+                days <= 14
+                  ? "bg-warning text-dark"
+                  : "bg-gray-100 text-body-color",
+                days === 0 ? "Deadline today" : `in ${days} days`
+              );
+        items.push({
+          days,
+          html: `<span><span class="font-medium text-dark">${esc(
+            debtLabel(debt)
+          )}</span> <span class="text-body-color">· ${fmt(
+            left
+          )} left · pay off by ${fmtDate(
+            parseDate(debt.deadline)
+          )}</span></span>${badge}`,
+        });
+      }
+    });
+
+    if (items.length === 0) {
+      list.innerHTML = `<li class="text-body-color">Nothing coming up. Add a Friday payment plan or a pay-off deadline to a debt.</li>`;
+      return;
+    }
+
+    list.innerHTML = items
+      .sort((a, b) => a.days - b.days)
+      .map(
+        (item) => `
+        <li class="flex flex-wrap items-center justify-between gap-2 border-t border-gray-100 py-2 first:border-t-0">
+          ${item.html}
+        </li>`
+      )
+      .join("");
+  }
+
+  function renderPayForm() {
+    const { pay } = state;
+    if (document.activeElement !== $("pay-amount")) {
+      $("pay-amount").value = pay.amount ? (pay.amount / 100).toFixed(2) : "";
+    }
+    $("pay-frequency").value = pay.frequency;
+    $("pay-next").value = pay.nextPayDate;
+
+    const next = nextPayday(pay.nextPayDate, pay.frequency, new Date());
+    $("pay-next-info").textContent = next
+      ? `Next payday: ${fmtDate(next)} (${
+          daysBetween(new Date(), next) === 0
+            ? "today"
+            : "in " + daysBetween(new Date(), next) + " days"
+        })`
+      : "";
+  }
+
+  function renderEssentials() {
+    const list = $("essential-list");
+    if (state.essentials.length === 0) {
+      list.innerHTML = `<li class="text-body-color">Nothing added yet, e.g. rent, bills, food, travel.</li>`;
+    } else {
+      list.innerHTML = state.essentials
+        .map(
+          (e) => `
+          <li class="border-t border-gray-100 py-2 first:border-t-0 ${
+            essentialDone(e) ? "opacity-60" : ""
+          }">
+            <div class="flex items-center justify-between gap-3">
+            <span class="min-w-0 text-dark">${esc(e.name)}${
+            essentialDone(e)
+              ? ` <span class="ml-1 whitespace-nowrap rounded-full bg-secondary px-2 py-0.5 text-xs font-medium text-white">Paid off</span>`
+              : ""
+          }</span>
+            <span class="flex items-center gap-3">
+              <span class="font-medium text-dark ${
+                essentialDone(e) ? "line-through" : ""
+              }">${fmt(e.amount)}</span>
+              ${
+                e.total && !essentialDone(e)
+                  ? `<button data-action="essential-paid" data-id="${e.id}" class="text-xs font-medium text-secondary hover:underline">Paid</button>`
+                  : ""
+              }
+              <button data-action="edit-essential" data-id="${
+                e.id
+              }" class="text-xs font-medium text-body-color hover:text-dark hover:underline">Edit</button>
+              <button data-action="delete-essential" data-id="${
+                e.id
+              }" class="text-xs font-medium text-red-600 hover:underline">Remove</button>
+            </span>
+            </div>
+            ${essentialProgress(e)}
+          </li>`
+        )
+        .join("");
+    }
+    $("essential-total").textContent = fmt(
+      sum(
+        state.essentials.filter((e) => !essentialDone(e)),
+        (e) => e.amount
+      )
+    );
+  }
+
+  // For an essential being paid off: how much is left, as a bar and a %.
+  function essentialProgress(e) {
+    if (!e.total) return "";
+    const left = essentialLeft(e);
+    const pctLeft = Math.round((left / e.total) * 100);
+    return `
+      <div class="mt-1.5 flex items-center gap-2">
+        <div class="h-1.5 flex-1 overflow-hidden rounded-full bg-gray-200">
+          <div class="h-full rounded-full bg-secondary" style="width:${
+            100 - pctLeft
+          }%"></div>
+        </div>
+        <span class="whitespace-nowrap text-xs text-body-color"><span class="font-semibold text-dark">${pctLeft}% left</span> · ${fmt(
+      left
+    )} of ${fmt(e.total)}</span>
+      </div>`;
+  }
+
+  function renderPlan() {
+    const out = $("plan-output");
+    $("plan-strategy").value = state.plan.strategy;
+    $("plan-buffer").value = state.plan.bufferPercent;
+
+    if (!state.pay.amount) {
+      out.innerHTML = `<p class="text-body-color">Enter your take-home pay above to see a plan.</p>`;
+      return;
+    }
+
+    const plan = buildPlan(state);
+    const freq = state.pay.frequency;
+    // Month 1 of the plan is the month of the next payday.
+    const firstPay =
+      nextPayday(state.pay.nextPayDate, freq, new Date()) || new Date();
+    const planMonth = (n) => fmtMonth(addMonths(firstPay, n - 1));
+    const showPerPay = freq !== "monthly";
+    const names = Object.fromEntries(
+      state.debts.map((d) => [d.id, debtLabel(d)])
+    );
+    const balances = Object.fromEntries(
+      state.debts.map((d) => [d.id, remainingOn(state, d)])
+    );
+
+    const row = (label, value, strong, colour) => `
+      <div class="flex justify-between py-1 ${
+        strong ? "border-t border-gray-200 pt-2 font-semibold" : ""
+      }">
+        <span class="${
+          strong ? "text-dark" : "text-body-color"
+        }">${label}</span>
+        <span class="${colour || "text-dark"}">${value}</span>
+      </div>`;
+
+    let html = `
+      <div class="mb-6 rounded-lg bg-gray-50 p-4 text-sm">
+        ${row("Take-home pay (per month)", fmt(plan.monthlyIncome))}
+        ${row("Essentials", "− " + fmt(plan.essentialsTotal))}
+        ${row(
+          "Left after essentials",
+          fmt(plan.leftover),
+          true,
+          plan.leftover < 0 ? "text-red-600" : "text-dark"
+        )}
+        ${row(
+          `Savings buffer (${state.plan.bufferPercent}%)`,
+          "− " + fmt(plan.buffer)
+        )}
+        ${row(
+          "Available for debts",
+          fmt(plan.debtBudget),
+          true,
+          "text-primary"
+        )}
+      </div>`;
+
+    if (plan.leftover < 0) {
+      html += `<p class="mb-4 rounded-lg bg-red-50 p-4 text-sm text-red-700">Your essentials cost ${fmt(
+        -plan.leftover
+      )} more than you take home each month. Check the essentials list, or speak to a free debt adviser (see the tip below).</p>`;
+    }
+
+    if (plan.order.length === 0) {
+      html += `<p class="text-body-color">${
+        state.debts.length
+          ? "All debts are paid off. Well done!"
+          : "Add a debt to see how to split your money."
+      }</p>`;
+      out.innerHTML = html;
+      return;
+    }
+
+    html += `
+      <div class="overflow-x-auto">
+        <table class="w-full text-sm">
+          <thead>
+            <tr class="text-left text-body-color">
+              <th class="pb-2 pr-3 font-medium">#</th>
+              <th class="pb-2 pr-3 font-medium">Debt</th>
+              <th class="pb-2 pr-3 text-right font-medium">Left</th>
+              <th class="pb-2 pr-3 text-right font-medium">Pay / month</th>
+              ${
+                showPerPay
+                  ? `<th class="pb-2 pr-3 text-right font-medium">Pay / payday</th>`
+                  : ""
+              }
+              <th class="pb-2 text-right font-medium">Cleared by</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${plan.order
+              .map((id, i) => {
+                const month = plan.forecast.payoffMonth[id];
+                const amount = plan.allocation[id] || 0;
+                return `
+                <tr class="border-t border-gray-100">
+                  <td class="py-2 pr-3 text-body-color">${i + 1}</td>
+                  <td class="py-2 pr-3 font-medium text-dark">${esc(
+                    names[id]
+                  )}</td>
+                  <td class="py-2 pr-3 text-right text-body-color">${fmt(
+                    balances[id]
+                  )}</td>
+                  <td class="py-2 pr-3 text-right font-semibold text-primary">${fmt(
+                    amount
+                  )}</td>
+                  ${
+                    showPerPay
+                      ? `<td class="py-2 pr-3 text-right text-dark">${fmt(
+                          perPayday(amount, freq)
+                        )}</td>`
+                      : ""
+                  }
+                  <td class="py-2 text-right text-body-color">${
+                    month ? planMonth(month) : "—"
+                  }</td>
+                </tr>`;
+              })
+              .join("")}
+          </tbody>
+        </table>
+      </div>`;
+
+    const f = plan.forecast;
+    if (f.possible && f.months) {
+      html += `
+        <div class="mt-6 rounded-lg bg-primary bg-opacity-5 p-4">
+          <p class="text-sm text-body-color">At this rate you'll be debt-free by</p>
+          <p class="text-2xl font-bold text-primary">${planMonth(f.months)}</p>
+          <p class="text-sm text-body-color">${f.months} month${
+        f.months === 1 ? "" : "s"
+      }</p>
+        </div>`;
+    } else if (!f.possible) {
+      html += `<p class="mt-6 rounded-lg bg-red-50 p-4 text-sm text-red-700">At this budget the debts won't be cleared, because there's nothing left for them after essentials and savings. Try a smaller savings buffer or fewer essentials, or get free advice.</p>`;
+    }
+
+    if (plan.unused > 0) {
+      html += `<p class="mt-4 text-sm text-body-color">${fmt(
+        plan.unused
+      )} a month is spare after paying everything off. Add it to your savings.</p>`;
+    }
+
+    out.innerHTML = html;
+  }
+
+  // ===== Actions =====
+
+  // The Friday plan being edited in the debt form, as { isoDate: pence }.
+  let formSchedule = {};
+
+  function monthOptions() {
+    const now = new Date();
+    const months = new Set();
+    for (let i = 0; i < 12; i++) {
+      const d = new Date(now.getFullYear(), now.getMonth() + i, 1);
+      months.add(toIso(d).slice(0, 7));
+    }
+    Object.keys(formSchedule).forEach((date) => months.add(date.slice(0, 7)));
+    return [...months].sort();
+  }
+
+  function renderScheduleForm(month) {
+    const select = $("sched-month");
+    select.innerHTML = monthOptions()
+      .map(
+        (m) =>
+          `<option value="${m}">${parseDate(m + "-01").toLocaleDateString(
+            "en-GB",
+            { month: "long", year: "numeric" }
+          )}</option>`
+      )
+      .join("");
+    select.value = month || todayIso().slice(0, 7);
+    renderFridays();
+  }
+
+  function renderFridays() {
+    const month = $("sched-month").value;
+    const fridays = fridaysInMonth(month);
+    $("sched-fridays").innerHTML = fridays
+      .map(
+        (date) => `
+        <label class="flex items-center justify-between gap-3">
+          <span class="text-sm ${
+            fridayIsPast(date) ? "text-body-color" : "text-dark"
+          }">${fmtFriday(date)}${fridayIsPast(date) ? " (past)" : ""}</span>
+          <input data-friday="${date}" type="number" min="0" step="0.01" inputmode="decimal"
+            value="${
+              formSchedule[date] ? (formSchedule[date] / 100).toFixed(2) : ""
+            }"
+            placeholder="0.00"
+            class="w-32 rounded-lg border border-gray-200 px-3 py-1.5 text-right text-dark outline-none focus:border-primary" />
+        </label>`
+      )
+      .join("");
+    const total = fridays.reduce((t, d) => t + (formSchedule[d] || 0), 0);
+    $("sched-total").textContent = `${fridays.length} Fridays · ${fmt(
+      total
+    )} planned this month`;
+  }
+
+  function fridayIsPast(date) {
+    return date < todayIso();
+  }
+
+  $("sched-month").addEventListener("change", renderFridays);
+
+  $("sched-fridays").addEventListener("input", (e) => {
+    const date = e.target.dataset.friday;
+    if (!date) return;
+    const amount = toPence(e.target.value);
+    if (amount > 0) formSchedule[date] = amount;
+    else delete formSchedule[date];
+    const fridays = fridaysInMonth($("sched-month").value);
+    const total = fridays.reduce((t, d) => t + (formSchedule[d] || 0), 0);
+    $("sched-total").textContent = `${fridays.length} Fridays · ${fmt(
+      total
+    )} planned this month`;
+  });
+
+  $("sched-fill").addEventListener("click", () => {
+    const weekly = toPence($("debt-weekly").value);
+    if (!(weekly > 0)) {
+      flash("Enter a weekly payment above first.", true);
+      return;
+    }
+    // Only Fridays from today on; earlier ones are already over.
+    fridaysInMonth($("sched-month").value)
+      .filter((date) => !fridayIsPast(date))
+      .forEach((date) => {
+        formSchedule[date] = weekly;
+      });
+    renderFridays();
+  });
+
+  $("sched-copy").addEventListener("click", () => {
+    const month = $("sched-month").value;
+    const amounts = fridaysInMonth(month).map((d) => formSchedule[d] || 0);
+    if (!amounts.some(Boolean)) {
+      flash("Set some Friday amounts for this month first.", true);
+      return;
+    }
+    const [y, m] = month.split("-").map(Number);
+    const next = toIso(new Date(y, m, 1)).slice(0, 7);
+    // Line the Fridays up in order. A Friday left blank (such as one already
+    // past) takes the amount of the nearest Friday that has one, and a 5th
+    // Friday repeats the last amount.
+    const filled = amounts.map((amount, i) => {
+      if (amount) return amount;
+      const before = amounts.slice(0, i).reverse().find(Boolean);
+      return before || amounts.slice(i).find(Boolean);
+    });
+    fridaysInMonth(next).forEach((date, i) => {
+      formSchedule[date] = filled[Math.min(i, filled.length - 1)];
+    });
+    renderScheduleForm(next);
+    flash("Copied to the next month.");
+  });
+
+  $("sched-until").addEventListener("click", () => {
+    const weekly = toPence($("debt-weekly").value);
+    if (!(weekly > 0)) {
+      flash("Enter a weekly payment above first.", true);
+      return;
+    }
+    const id = $("debt-id").value;
+    const existing = state.debts.find((d) => d.id === id);
+    const owed =
+      toPence($("debt-amount").value) - (existing ? paidOn(state, id) : 0);
+    if (!(owed > 0)) {
+      flash("Enter the amount owed above first.", true);
+      return;
+    }
+    // Start from the next Friday that hasn't passed or been paid yet.
+    let friday = weekFriday(new Date());
+    if (
+      fridayIsPast(friday) ||
+      (existing && fridayPaid(existing, state.payments, friday))
+    ) {
+      friday = addDays(friday, 7);
+    }
+    // Replace the plan from here on with weekly amounts until it's covered.
+    Object.keys(formSchedule)
+      .filter((date) => date >= friday)
+      .forEach((date) => delete formSchedule[date]);
+    const first = friday;
+    let planned = 0;
+    let count = 0;
+    while (planned < owed) {
+      const amount = Math.min(weekly, owed - planned);
+      formSchedule[friday] = amount;
+      planned += amount;
+      count++;
+      friday = addDays(friday, 7);
+    }
+    renderScheduleForm(first.slice(0, 7));
+    flash(
+      `Planned ${count} Fridays: paid off by ${fmtFriday(addDays(friday, -7))}.`
+    );
+  });
+
+  $("sched-clear").addEventListener("click", () => {
+    fridaysInMonth($("sched-month").value).forEach((date) => {
+      delete formSchedule[date];
+    });
+    renderFridays();
+  });
+
+  function resetDebtForm() {
+    $("debt-form").reset();
+    $("debt-id").value = "";
+    formSchedule = {};
+    $("debt-advanced").open = false;
+    renderScheduleForm();
+    $("debt-submit").textContent = "Add debt";
+    $("debt-cancel").classList.add("hidden");
+  }
+
+  $("debt-form").addEventListener("submit", (e) => {
+    e.preventDefault();
+    const id = $("debt-id").value;
+    const amount = toPence($("debt-amount").value);
+    const typed = $("debt-name").value.trim();
+    // Reuse how an existing person's name is already spelled, so "klarna"
+    // joins "Klarna" with the same label.
+    const same = state.debts.find(
+      (d) => d.name.trim().toLowerCase() === typed.toLowerCase()
+    );
+    const name = same ? same.name.trim() : typed;
+    if (!name || !(amount > 0)) {
+      flash("Enter who you owe and an amount above £0.", true);
+      return;
+    }
+    const weekly = toPence($("debt-weekly").value);
+    const fields = {
+      name,
+      item: $("debt-item").value.trim(),
+      amount,
+      weekly: weekly > 0 ? weekly : 0,
+      deadline: $("debt-deadline").value,
+      schedule: Object.assign({}, formSchedule),
+      notes: $("debt-notes").value.trim(),
+    };
+
+    if (id) {
+      const debt = state.debts.find((d) => d.id === id);
+      if (amount < paidOn(state, id)) {
+        flash(
+          `You've already paid ${fmt(
+            paidOn(state, id)
+          )} on this. The amount can't be lower than that.`,
+          true
+        );
+        return;
+      }
+      Object.assign(debt, fields);
+      flash("Debt updated.");
+    } else {
+      state.debts.push(
+        Object.assign({ id: newId(), createdAt: todayIso() }, fields)
+      );
+      flash(`Added ${name}.`);
+    }
+    saveState();
+    resetDebtForm();
+    render();
+  });
+
+  $("debt-cancel").addEventListener("click", resetDebtForm);
+
+  $("payment-form").addEventListener("submit", (e) => {
+    e.preventDefault();
+    const debt = state.debts.find((d) => d.id === $("payment-debt").value);
+    const amount = toPence($("payment-amount").value);
+    if (!debt) return;
+    if (!(amount > 0)) {
+      flash("Enter a payment amount above £0.", true);
+      return;
+    }
+    const left = remainingOn(state, debt);
+    if (amount > left) {
+      flash(
+        `Only ${fmt(left)} is left on ${debtLabel(debt)}. Enter up to that.`,
+        true
+      );
+      return;
+    }
+    const date = $("payment-date").value || todayIso();
+    // Count the payment towards a missed or this week's planned Friday, so it
+    // drops off "Coming up". Undoing the payment brings it back.
+    recordPayment(
+      debt,
+      amount,
+      date,
+      $("payment-note").value.trim(),
+      fridayForPayment(debt, state.payments, date)
+    );
+    $("payment-amount").value = "";
+    $("payment-note").value = "";
+  });
+
+  function recordPayment(debt, amount, date, note, friday) {
+    const payment = { id: newId(), debtId: debt.id, amount, date, note };
+    if (friday) {
+      payment.forFriday = friday.date;
+      payment.missed = friday.missed;
+    }
+    state.payments.push(payment);
+    saveState();
+    const nowLeft = remainingOn(state, debt);
+    flash(
+      nowLeft === 0
+        ? `${debtLabel(debt)} is paid off!`
+        : `Paid ${fmt(amount)}${
+            friday && friday.missed
+              ? " and cleared the missed Friday payment"
+              : friday
+              ? ` for ${fmtFriday(friday.date)}`
+              : ""
+          }. ${fmt(nowLeft)} left on ${debtLabel(debt)}.`
+    );
+    render();
+  }
+
+  $("payment-debt").addEventListener("change", weeklyPlaceholder);
+
+  $("pay-form").addEventListener("submit", (e) => {
+    e.preventDefault();
+    const amount = toPence($("pay-amount").value);
+    state.pay = {
+      amount: amount > 0 ? amount : 0,
+      frequency: $("pay-frequency").value,
+      nextPayDate: $("pay-next").value,
+    };
+    saveState();
+    flash("Pay saved.");
+    render();
+  });
+
+  $("essential-form").addEventListener("submit", (e) => {
+    e.preventDefault();
+    const name = $("essential-name").value.trim();
+    const amount = toPence($("essential-amount").value);
+    if (!name || !(amount > 0)) {
+      flash("Enter a name and a monthly amount above £0.", true);
+      return;
+    }
+    const editing = state.essentials.find(
+      (x) => x.id === $("essential-id").value
+    );
+    if (editing) {
+      Object.assign(editing, { name, amount });
+      flash(`${name} updated.`);
+    } else {
+      state.essentials.push({ id: newId(), name, amount });
+    }
+    saveState();
+    resetEssentialForm();
+    $("essential-name").focus();
+    render();
+  });
+
+  function resetEssentialForm() {
+    $("essential-form").reset();
+    $("essential-id").value = "";
+    $("essential-submit").textContent = "Add";
+    $("essential-cancel").classList.add("hidden");
+  }
+
+  $("essential-cancel").addEventListener("click", resetEssentialForm);
+
+  $("plan-strategy").addEventListener("change", (e) => {
+    state.plan.strategy = e.target.value;
+    saveState();
+    render();
+  });
+
+  $("plan-buffer").addEventListener("change", (e) => {
+    const value = Math.round(parseFloat(e.target.value));
+    state.plan.bufferPercent = Number.isFinite(value)
+      ? Math.min(Math.max(value, 0), 100)
+      : 0;
+    saveState();
+    render();
+  });
+
+  document.addEventListener("click", (e) => {
+    const btn = e.target.closest("[data-action]");
+    if (!btn) return;
+    const id = btn.dataset.id;
+
+    switch (btn.dataset.action) {
+      case "pay": {
+        const d = state.debts.find((x) => x.id === id);
+        $("payment-debt").value = id;
+        weeklyPlaceholder();
+        if (suggestedAmount(d)) {
+          $("payment-amount").value = (suggestedAmount(d) / 100).toFixed(2);
+        }
+        $("payments").scrollIntoView({ behavior: "smooth" });
+        $("payment-amount").focus({ preventScroll: true });
+        break;
+      }
+      case "edit-debt": {
+        const d = state.debts.find((x) => x.id === id);
+        $("debt-id").value = d.id;
+        $("debt-name").value = d.name;
+        $("debt-item").value = d.item || "";
+        $("debt-amount").value = (d.amount / 100).toFixed(2);
+        $("debt-weekly").value = d.weekly ? (d.weekly / 100).toFixed(2) : "";
+        $("debt-deadline").value = d.deadline || "";
+        formSchedule = Object.assign({}, d.schedule || {});
+        const upcoming = Object.keys(formSchedule)
+          .sort()
+          .find((date) => date >= todayIso());
+        renderScheduleForm(upcoming && upcoming.slice(0, 7));
+        $("debt-advanced").open = Object.keys(formSchedule).length > 0;
+        $("debt-notes").value = d.notes || "";
+        $("debt-submit").textContent = "Save changes";
+        $("debt-cancel").classList.remove("hidden");
+        $("debts").scrollIntoView({ behavior: "smooth" });
+        break;
+      }
+      case "delete-debt": {
+        const d = state.debts.find((x) => x.id === id);
+        askConfirm(
+          `Delete ${debtLabel(d)} and all its payments?`,
+          "Delete"
+        ).then((ok) => {
+          if (!ok) return;
+          state.debts = state.debts.filter((x) => x.id !== id);
+          state.payments = state.payments.filter((p) => p.debtId !== id);
+          if ($("debt-id").value === id) resetDebtForm();
+          saveState();
+          render();
+        });
+        break;
+      }
+      case "delete-payment": {
+        askConfirm("Undo this payment?", "Undo payment").then((ok) => {
+          if (!ok) return;
+          state.payments = state.payments.filter((p) => p.id !== id);
+          saveState();
+          render();
+        });
+        break;
+      }
+      case "payday-paid": {
+        const debt = state.debts.find((x) => x.id === id);
+        recordPayment(debt, Number(btn.dataset.amount), todayIso(), "", {
+          date: btn.dataset.friday,
+          missed: Boolean(btn.dataset.missed),
+        });
+        break;
+      }
+      case "edit-essential": {
+        const item = state.essentials.find((x) => x.id === id);
+        $("essential-id").value = item.id;
+        $("essential-name").value = item.name;
+        $("essential-amount").value = (item.amount / 100).toFixed(2);
+        $("essential-submit").textContent = "Save";
+        $("essential-cancel").classList.remove("hidden");
+        $("essential-name").focus();
+        break;
+      }
+      case "essential-paid": {
+        const item = state.essentials.find((x) => x.id === id);
+        const amount = Math.min(item.amount, essentialLeft(item));
+        const after = essentialLeft(item) - amount;
+        askConfirm(
+          `Mark ${fmt(amount)} paid for ${item.name}? ${
+            after === 0 ? "That pays it off." : `${fmt(after)} will be left.`
+          }`,
+          "Mark paid"
+        ).then((ok) => {
+          if (!ok) return;
+          item.paid = (item.paid || 0) + amount;
+          saveState();
+          flash(
+            essentialDone(item)
+              ? `${item.name} is paid off and no longer counts each month.`
+              : `Paid ${fmt(amount)} for ${item.name}.`
+          );
+          render();
+        });
+        break;
+      }
+      case "delete-essential": {
+        if ($("essential-id").value === id) resetEssentialForm();
+        state.essentials = state.essentials.filter((x) => x.id !== id);
+        saveState();
+        render();
+        break;
+      }
+    }
+  });
+
+  // ===== Confirm dialog =====
+  // In-page rather than window.confirm(), which the online viewer blocks.
+
+  function askConfirm(message, okLabel) {
+    return new Promise((resolve) => {
+      const dialog = $("confirm-dialog");
+      $("confirm-message").textContent = message;
+      $("confirm-ok").textContent = okLabel;
+      dialog.classList.remove("hidden");
+      $("confirm-cancel").focus();
+      const close = (ok) => {
+        dialog.classList.add("hidden");
+        $("confirm-ok").onclick = $("confirm-cancel").onclick = null;
+        document.removeEventListener("keydown", onKey);
+        resolve(ok);
+      };
+      const onKey = (e) => {
+        if (e.key === "Escape") close(false);
+      };
+      $("confirm-ok").onclick = () => close(true);
+      $("confirm-cancel").onclick = () => close(false);
+      document.addEventListener("keydown", onKey);
+    });
+  }
+
+  // ===== Sync (online version only) =====
+  // Opened as a claude.ai artifact, the tracker also keeps its data in the
+  // viewer's private store, so every device they sign in on sees the same
+  // debts. Elsewhere (the downloaded file) this stays off.
+
+  let cloudDoc = null;
+  let cloudJson = null;
+  let cloudTimer = null;
+  let cloudWrite = Promise.resolve();
+
+  function setSyncStatus(text) {
+    $("sync-status").textContent = text;
+  }
+
+  function pushToCloud() {
+    if (!cloudDoc) return;
+    clearTimeout(cloudTimer);
+    // Coalesce bursts of edits into one write, one write at a time.
+    cloudTimer = setTimeout(() => {
+      const json = JSON.stringify(state);
+      if (json === cloudJson) return;
+      cloudJson = json;
+      setSyncStatus("Saving to your account…");
+      cloudWrite = cloudWrite
+        .then(() => cloudDoc.set({ json, savedAt: new Date().toISOString() }))
+        .then(
+          () => setSyncStatus("Synced to your Claude account"),
+          () => setSyncStatus("Couldn't sync. Changes are kept on this device.")
+        );
+    }, 600);
+  }
+
+  function applyRemote(json) {
+    if (typeof json !== "string" || json === cloudJson) return;
+    try {
+      const data = JSON.parse(json);
+      cloudJson = json;
+      state = normalizeState(Object.assign(emptyState(), data));
+      root.localStorage.setItem(STORAGE_KEY, json);
+    } catch (e) {
+      // Keep what's on screen if the stored copy can't be read.
+    }
+    render();
+  }
+
+  async function connectCloud() {
+    if (!root.claude || typeof root.claude.use !== "function") return;
+    const [db, user] = await Promise.all([
+      root.claude.use("db"),
+      root.claude.use("user"),
+    ]);
+    const id = user ? await user.id() : null;
+    if (!db || !id) {
+      setSyncStatus("Sign in to Claude to sync between devices.");
+      return;
+    }
+    const ref = db.doc(`data/users/${id}/tracker`);
+    let snap;
+    try {
+      snap = await ref.get();
+    } catch (e) {
+      setSyncStatus("Couldn't reach your account. Saved on this device.");
+      return;
+    }
+    cloudDoc = ref;
+    const hasLocalData =
+      state.debts.length || state.payments.length || state.pay.amount;
+    if (snap.exists) applyRemote(snap.data().json);
+    else if (hasLocalData) pushToCloud();
+    setSyncStatus("Synced to your Claude account");
+    ref.onSnapshot(
+      (s) => {
+        if (s.exists && !s.metadata.hasPendingWrites)
+          applyRemote(s.data().json);
+      },
+      () => setSyncStatus("Sync stopped. Reload the page to reconnect.")
+    );
+    render();
+  }
+
+  // ===== Backup =====
+
+  $("export-btn").addEventListener("click", async () => {
+    const json = JSON.stringify(state, null, 2);
+    const filename = `debt-tracker-backup-${todayIso()}.json`;
+    const downloads =
+      root.claude && typeof root.claude.use === "function"
+        ? await root.claude.use("downloads")
+        : null;
+    if (downloads) {
+      downloads.save({ filename, data: json }).catch((e) => {
+        if (e && e.code !== "declined") {
+          flash("The backup couldn't be saved here.", true);
+        }
+      });
+      return;
+    }
+    const blob = new Blob([json], { type: "application/json" });
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = `debt-tracker-backup-${todayIso()}.json`;
+    a.click();
+    URL.revokeObjectURL(a.href);
+  });
+
+  $("import-file").addEventListener("change", (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = () => {
+      try {
+        const data = JSON.parse(reader.result);
+        if (!Array.isArray(data.debts) || !Array.isArray(data.payments)) {
+          throw new Error("bad file");
+        }
+        askConfirm(
+          "Replace everything in the tracker with this backup?",
+          "Replace"
+        ).then((ok) => {
+          if (!ok) return;
+          state = normalizeState(Object.assign(emptyState(), data));
+          saveState();
+          render();
+          flash("Backup restored.");
+        });
+      } catch (err) {
+        flash("That file isn't a debt tracker backup.", true);
+      } finally {
+        e.target.value = "";
+      }
+    };
+    reader.readAsText(file);
+  });
+
+  $("reset-btn").addEventListener("click", async () => {
+    const ok = await askConfirm(
+      "Delete ALL debts, payments and budget settings? This can't be undone.",
+      "Delete everything"
+    );
+    if (!ok) return;
+    state = emptyState();
+    saveState();
+    resetDebtForm();
+    render();
+    flash("Tracker cleared.");
+  });
+
+  renderScheduleForm();
+  render();
+  connectCloud();
+})(typeof window !== "undefined" ? window : globalThis);
