@@ -80,7 +80,10 @@
   function buildPlan(state) {
     const { pay, essentials, plan } = state;
     const monthlyIncome = pay.amount ? toMonthly(pay.amount, pay.frequency) : 0;
-    const essentialsTotal = sum(essentials, (e) => e.amount);
+    const essentialsTotal = sum(
+      essentials.filter((e) => !essentialDone(e)),
+      (e) => e.amount
+    );
     const leftover = monthlyIncome - essentialsTotal;
     const buffer = Math.round(
       (Math.max(leftover, 0) * plan.bufferPercent) / 100
@@ -480,6 +483,17 @@
     };
   }
 
+  // Some essentials are paid off over time (a glasses plan, a water bill
+  // balance): they carry a `total` and how much is `paid`. Once paid off
+  // they stop counting towards the monthly essentials.
+  function essentialLeft(e) {
+    return e.total ? Math.max(e.total - (e.paid || 0), 0) : null;
+  }
+
+  function essentialDone(e) {
+    return Boolean(e.total) && essentialLeft(e) === 0;
+  }
+
   const calc = {
     toPence,
     paidOn,
@@ -502,6 +516,8 @@
     leftByPerson,
     debtFreeDate,
     countdown,
+    essentialLeft,
+    essentialDone,
     fridaysInMonth,
     fridayPlan,
     fridayForPayment,
@@ -1277,10 +1293,24 @@
       list.innerHTML = state.essentials
         .map(
           (e) => `
-          <li class="flex items-center justify-between border-t border-gray-100 py-2 first:border-t-0">
-            <span class="text-dark">${esc(e.name)}</span>
+          <li class="border-t border-gray-100 py-2 first:border-t-0 ${
+            essentialDone(e) ? "opacity-60" : ""
+          }">
+            <div class="flex items-center justify-between gap-3">
+            <span class="min-w-0 text-dark">${esc(e.name)}${
+            essentialDone(e)
+              ? ` <span class="ml-1 whitespace-nowrap rounded-full bg-secondary px-2 py-0.5 text-xs font-medium text-white">Paid off</span>`
+              : ""
+          }</span>
             <span class="flex items-center gap-3">
-              <span class="font-medium text-dark">${fmt(e.amount)}</span>
+              <span class="font-medium text-dark ${
+                essentialDone(e) ? "line-through" : ""
+              }">${fmt(e.amount)}</span>
+              ${
+                e.total && !essentialDone(e)
+                  ? `<button data-action="essential-paid" data-id="${e.id}" class="text-xs font-medium text-secondary hover:underline">Paid</button>`
+                  : ""
+              }
               <button data-action="edit-essential" data-id="${
                 e.id
               }" class="text-xs font-medium text-body-color hover:text-dark hover:underline">Edit</button>
@@ -1288,13 +1318,36 @@
                 e.id
               }" class="text-xs font-medium text-red-600 hover:underline">Remove</button>
             </span>
+            </div>
+            ${essentialProgress(e)}
           </li>`
         )
         .join("");
     }
     $("essential-total").textContent = fmt(
-      sum(state.essentials, (e) => e.amount)
+      sum(
+        state.essentials.filter((e) => !essentialDone(e)),
+        (e) => e.amount
+      )
     );
+  }
+
+  // For an essential being paid off: how much is left, as a bar and a %.
+  function essentialProgress(e) {
+    if (!e.total) return "";
+    const left = essentialLeft(e);
+    const pctLeft = Math.round((left / e.total) * 100);
+    return `
+      <div class="mt-1.5 flex items-center gap-2">
+        <div class="h-1.5 flex-1 overflow-hidden rounded-full bg-gray-200">
+          <div class="h-full rounded-full bg-secondary" style="width:${
+            100 - pctLeft
+          }%"></div>
+        </div>
+        <span class="whitespace-nowrap text-xs text-body-color"><span class="font-semibold text-dark">${pctLeft}% left</span> · ${fmt(
+      left
+    )} of ${fmt(e.total)}</span>
+      </div>`;
   }
 
   function renderPlan() {
@@ -1861,6 +1914,28 @@
         $("essential-submit").textContent = "Save";
         $("essential-cancel").classList.remove("hidden");
         $("essential-name").focus();
+        break;
+      }
+      case "essential-paid": {
+        const item = state.essentials.find((x) => x.id === id);
+        const amount = Math.min(item.amount, essentialLeft(item));
+        const after = essentialLeft(item) - amount;
+        askConfirm(
+          `Mark ${fmt(amount)} paid for ${item.name}? ${
+            after === 0 ? "That pays it off." : `${fmt(after)} will be left.`
+          }`,
+          "Mark paid"
+        ).then((ok) => {
+          if (!ok) return;
+          item.paid = (item.paid || 0) + amount;
+          saveState();
+          flash(
+            essentialDone(item)
+              ? `${item.name} is paid off and no longer counts each month.`
+              : `Paid ${fmt(amount)} for ${item.name}.`
+          );
+          render();
+        });
         break;
       }
       case "delete-essential": {

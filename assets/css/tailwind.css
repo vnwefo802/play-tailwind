@@ -824,6 +824,10 @@ Ensure the default browser behavior of the `hidden` attribute.
   margin-left: 0.5rem;
 }
 
+.mt-1\.5 {
+  margin-top: 0.375rem;
+}
+
 .block {
   display: block;
 }
@@ -918,6 +922,14 @@ Ensure the default browser behavior of the `hidden` attribute.
 
 .h-2 {
   height: 0.5rem;
+}
+
+.h-1\.5 {
+  height: 0.375rem;
+}
+
+.h-1 {
+  height: 0.25rem;
 }
 
 .max-h-96 {
@@ -1947,6 +1959,11 @@ Ensure the default browser behavior of the `hidden` attribute.
   color: rgb(161 98 7 / var(--tw-text-opacity));
 }
 
+.line-through {
+  -webkit-text-decoration-line: line-through;
+  text-decoration-line: line-through;
+}
+
 .placeholder-white::-moz-placeholder {
   --tw-placeholder-opacity: 1;
   color: rgb(255 255 255 / var(--tw-placeholder-opacity));
@@ -1983,6 +2000,10 @@ Ensure the default browser behavior of the `hidden` attribute.
 
 .opacity-50 {
   opacity: 0.5;
+}
+
+.opacity-60 {
+  opacity: 0.6;
 }
 
 .shadow-lg {
