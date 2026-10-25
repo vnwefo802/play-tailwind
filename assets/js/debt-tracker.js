@@ -433,14 +433,21 @@
     if (state.pay && state.pay.amount) {
       const f = buildPlan(state).forecast;
       if (f.possible && f.months) {
-        const first =
-          nextPayday(state.pay.nextPayDate, state.pay.frequency, today) ||
-          today;
-        return {
-          kind: "month",
-          date: toIso(addMonths(first, f.months - 1)),
-          source: "budget",
-        };
+        // The payday in the month the plan clears everything, or that
+        // month's last day when no payday is set.
+        const payday = nextPayday(
+          state.pay.nextPayDate,
+          state.pay.frequency,
+          today
+        );
+        const date = payday
+          ? new Date(
+              payday.getFullYear(),
+              payday.getMonth() + f.months - 1,
+              payday.getDate()
+            )
+          : new Date(today.getFullYear(), today.getMonth() + f.months, 0);
+        return { kind: "month", date: toIso(date), source: "budget" };
       }
     }
     return {
@@ -791,14 +798,20 @@
     });
     const c = countdown(today, result.date);
     const parts =
-      c.years > 0
+      c.totalDays === 0
+        ? []
+        : c.years > 0
         ? [unit(c.years, "year", "years"), unit(c.months, "month", "months")]
         : c.months > 0
         ? [unit(c.months, "month", "months"), unit(c.weeks, "week", "weeks")]
-        : [unit(c.weeks, "week", "weeks"), unit(c.days, "day", "days")];
+        : c.weeks > 0
+        ? [unit(c.weeks, "week", "weeks"), unit(c.days, "day", "days")]
+        : [unit(c.days, "day", "days")];
     $("countdown-units").innerHTML = parts.join("");
     $("countdown-note").textContent =
-      result.source === "fridays"
+      c.totalDays === 0
+        ? "That's today. One last payment to go."
+        : result.source === "fridays"
         ? `Last payment on ${fmtFriday(
             result.date
           )} ${end.getFullYear()}, going by your Friday plans and weekly amounts.`
