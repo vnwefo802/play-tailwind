@@ -346,6 +346,39 @@
     return { payday, items };
   }
 
+  // "Klarna – Trip.com" when a debt says what it was for, else just "Klarna".
+  function debtLabel(d) {
+    return d.item ? `${d.name} – ${d.item}` : d.name;
+  }
+
+  // Debts grouped by who is owed (same name, ignoring case and spaces),
+  // in the order each person first appears.
+  function groupDebts(debts) {
+    const groups = new Map();
+    debts.forEach((d) => {
+      const key = d.name.trim().toLowerCase();
+      if (!groups.has(key)) groups.set(key, { name: d.name.trim(), debts: [] });
+      groups.get(key).debts.push(d);
+    });
+    return [...groups.values()];
+  }
+
+  // Bring saved data up to date: older strategies fall back to smallest
+  // first, and names saved as "Klarna – Trip.com" split into who and what.
+  function normalizeState(st) {
+    if (!["smallest", "due"].includes(st.plan.strategy)) {
+      st.plan.strategy = "smallest";
+    }
+    st.debts.forEach((d) => {
+      const parts = d.item ? null : d.name.split(" – ");
+      if (parts && parts.length === 2 && parts[0].trim() && parts[1].trim()) {
+        d.name = parts[0].trim();
+        d.item = parts[1].trim();
+      }
+    });
+    return st;
+  }
+
   const calc = {
     toPence,
     paidOn,
@@ -362,6 +395,9 @@
     projection,
     planStatus,
     paydayItems,
+    debtLabel,
+    groupDebts,
+    normalizeState,
     fridaysInMonth,
     fridayPlan,
     fridayForPayment,
@@ -391,11 +427,7 @@
     try {
       const raw = root.localStorage.getItem(STORAGE_KEY);
       if (!raw) return emptyState();
-      const loaded = Object.assign(emptyState(), JSON.parse(raw));
-      if (!["smallest", "due"].includes(loaded.plan.strategy)) {
-        loaded.plan.strategy = "smallest";
-      }
-      return loaded;
+      return normalizeState(Object.assign(emptyState(), JSON.parse(raw)));
     } catch (e) {
       return emptyState();
     }
@@ -495,7 +527,9 @@
     );
     $("payday").classList.toggle("hidden", items.length === 0);
     if (items.length === 0) return;
-    const names = Object.fromEntries(state.debts.map((d) => [d.id, d.name]));
+    const names = Object.fromEntries(
+      state.debts.map((d) => [d.id, debtLabel(d)])
+    );
     $("payday-date").textContent =
       payday === todayIso() ? "Today is payday" : fmtFriday(payday);
     $("payday-list").innerHTML = items
@@ -558,22 +592,67 @@
       return;
     }
 
-    list.innerHTML = state.debts
-      .map((d) => {
-        const paid = paidOn(state, d.id);
-        const left = remainingOn(state, d);
-        const pct = d.amount
-          ? Math.min(Math.round((paid / d.amount) * 100), 100)
-          : 0;
-        const done = left === 0;
-        const details = [
-          d.weekly ? `${fmt(d.weekly)}/week` : "",
-          d.deadline ? `pay off by ${fmtDate(parseDate(d.deadline))}` : "",
-        ]
-          .filter(Boolean)
-          .join(" · ");
+    const totals = (debts) => ({
+      left: sum(debts, (d) => remainingOn(state, d)),
+      owed: sum(debts, (d) => d.amount),
+    });
 
-        return `
+    const groups = groupDebts(state.debts).map((group) => {
+      if (group.debts.length === 1) return debtCard(group.debts[0], false);
+      const t = totals(group.debts);
+      return `
+        <section class="space-y-3 rounded-xl border border-gray-200 bg-gray-50 p-3">
+          <div class="flex flex-wrap items-start justify-between gap-2 px-2 pt-1">
+            <h3 class="text-lg font-bold text-dark">${esc(group.name)}
+              <span class="text-sm font-normal text-body-color">· ${
+                group.debts.length
+              } debts</span></h3>
+            <div class="text-right">
+              <p class="text-xl font-bold ${
+                t.left === 0 ? "text-secondary" : "text-dark"
+              }">${fmt(t.left)}</p>
+              <p class="text-xs text-body-color">left of ${fmt(
+                t.owed
+              )} in total</p>
+            </div>
+          </div>
+          ${group.debts.map((d) => debtCard(d, true)).join("")}
+        </section>`;
+    });
+
+    const all = totals(state.debts);
+    list.innerHTML =
+      groups.join("") +
+      `
+      <div class="flex flex-wrap items-center justify-between gap-2 rounded-xl bg-dark px-5 py-4 text-white">
+        <span class="font-semibold">Total for everyone</span>
+        <span class="text-right">
+          <span class="block text-xl font-bold">${fmt(all.left)}</span>
+          <span class="block text-xs opacity-80">left of ${fmt(
+            all.owed
+          )} owed</span>
+        </span>
+      </div>`;
+  }
+
+  // One debt. Inside a person's group the card is titled by what it was for.
+  function debtCard(d, inGroup) {
+    const title = inGroup ? d.item || d.name : debtLabel(d);
+
+    const paid = paidOn(state, d.id);
+    const left = remainingOn(state, d);
+    const pct = d.amount
+      ? Math.min(Math.round((paid / d.amount) * 100), 100)
+      : 0;
+    const done = left === 0;
+    const details = [
+      d.weekly ? `${fmt(d.weekly)}/week` : "",
+      d.deadline ? `pay off by ${fmtDate(parseDate(d.deadline))}` : "",
+    ]
+      .filter(Boolean)
+      .join(" · ");
+
+    return `
         <div class="rounded-lg border ${
           done
             ? "border-secondary bg-secondary bg-opacity-5"
@@ -581,11 +660,11 @@
         } p-5">
           <div class="flex flex-wrap items-start justify-between gap-2">
             <div>
-              <h4 class="text-lg font-semibold text-dark">${esc(d.name)} ${
-          done
-            ? '<span class="ml-2 rounded-full bg-secondary px-2 py-0.5 text-xs font-medium text-white">Paid off</span>'
-            : ""
-        }</h4>
+              <h4 class="text-lg font-semibold text-dark">${esc(title)} ${
+      done
+        ? '<span class="ml-2 rounded-full bg-secondary px-2 py-0.5 text-xs font-medium text-white">Paid off</span>'
+        : ""
+    }</h4>
               ${
                 details
                   ? `<p class="text-sm text-body-color">${esc(details)}</p>`
@@ -628,8 +707,6 @@
             </span>
           </div>
         </div>`;
-      })
-      .join("");
   }
 
   function renderWeeklyStatus(d, left) {
@@ -721,7 +798,7 @@
       ? open
           .map(
             (d) =>
-              `<option value="${d.id}">${esc(d.name)} (${fmt(
+              `<option value="${d.id}">${esc(debtLabel(d))} (${fmt(
                 remainingOn(state, d)
               )} left)</option>`
           )
@@ -750,7 +827,9 @@
 
   function renderPayments() {
     const list = $("payment-list");
-    const names = Object.fromEntries(state.debts.map((d) => [d.id, d.name]));
+    const names = Object.fromEntries(
+      state.debts.map((d) => [d.id, debtLabel(d)])
+    );
     const payments = state.payments
       .slice()
       .sort((a, b) => (a.date < b.date ? 1 : a.date > b.date ? -1 : 0));
@@ -825,7 +904,7 @@
           items.push({
             days,
             html: `<span><span class="font-medium text-dark">${esc(
-              debt.name
+              debtLabel(debt)
             )}</span> <span class="text-body-color">· pay ${fmt(
               Math.min(f.amount, left)
             )} · ${fmtFriday(f.date)}</span></span>${badge}`,
@@ -847,7 +926,7 @@
         items.push({
           days,
           html: `<span><span class="font-medium text-dark">${esc(
-            debt.name
+            debtLabel(debt)
           )}</span> <span class="text-body-color">· ${fmt(
             left
           )} left · pay off by ${fmtDate(
@@ -933,7 +1012,9 @@
       nextPayday(state.pay.nextPayDate, freq, new Date()) || new Date();
     const planMonth = (n) => fmtMonth(addMonths(firstPay, n - 1));
     const showPerPay = freq !== "monthly";
-    const names = Object.fromEntries(state.debts.map((d) => [d.id, d.name]));
+    const names = Object.fromEntries(
+      state.debts.map((d) => [d.id, debtLabel(d)])
+    );
     const balances = Object.fromEntries(
       state.debts.map((d) => [d.id, remainingOn(state, d)])
     );
@@ -1117,7 +1198,7 @@
   }
 
   function fridayIsPast(date) {
-    return addDays(date, 2) < todayIso();
+    return date < todayIso();
   }
 
   $("sched-month").addEventListener("change", renderFridays);
@@ -1141,7 +1222,7 @@
       flash("Enter a weekly payment above first.", true);
       return;
     }
-    // Only this week's Friday onwards; earlier ones are already over.
+    // Only Fridays from today on; earlier ones are already over.
     fridaysInMonth($("sched-month").value)
       .filter((date) => !fridayIsPast(date))
       .forEach((date) => {
@@ -1188,8 +1269,12 @@
       flash("Enter the amount owed above first.", true);
       return;
     }
+    // Start from the next Friday that hasn't passed or been paid yet.
     let friday = weekFriday(new Date());
-    if (existing && fridayPaid(existing, state.payments, friday)) {
+    if (
+      fridayIsPast(friday) ||
+      (existing && fridayPaid(existing, state.payments, friday))
+    ) {
       friday = addDays(friday, 7);
     }
     // Replace the plan from here on with weekly amounts until it's covered.
@@ -1233,7 +1318,13 @@
     e.preventDefault();
     const id = $("debt-id").value;
     const amount = toPence($("debt-amount").value);
-    const name = $("debt-name").value.trim();
+    const typed = $("debt-name").value.trim();
+    // Reuse how an existing person's name is already spelled, so "klarna"
+    // joins "Klarna" with the same label.
+    const same = state.debts.find(
+      (d) => d.name.trim().toLowerCase() === typed.toLowerCase()
+    );
+    const name = same ? same.name.trim() : typed;
     if (!name || !(amount > 0)) {
       flash("Enter who you owe and an amount above £0.", true);
       return;
@@ -1241,6 +1332,7 @@
     const weekly = toPence($("debt-weekly").value);
     const fields = {
       name,
+      item: $("debt-item").value.trim(),
       amount,
       weekly: weekly > 0 ? weekly : 0,
       deadline: $("debt-deadline").value,
@@ -1286,7 +1378,7 @@
     const left = remainingOn(state, debt);
     if (amount > left) {
       flash(
-        `Only ${fmt(left)} is left on ${debt.name}. Enter up to that.`,
+        `Only ${fmt(left)} is left on ${debtLabel(debt)}. Enter up to that.`,
         true
       );
       return;
@@ -1316,14 +1408,14 @@
     const nowLeft = remainingOn(state, debt);
     flash(
       nowLeft === 0
-        ? `${debt.name} is paid off!`
+        ? `${debtLabel(debt)} is paid off!`
         : `Paid ${fmt(amount)}${
             friday && friday.missed
               ? " and cleared the missed Friday payment"
               : friday
               ? ` for ${fmtFriday(friday.date)}`
               : ""
-          }. ${fmt(nowLeft)} left on ${debt.name}.`
+          }. ${fmt(nowLeft)} left on ${debtLabel(debt)}.`
     );
     render();
   }
@@ -1394,6 +1486,7 @@
         const d = state.debts.find((x) => x.id === id);
         $("debt-id").value = d.id;
         $("debt-name").value = d.name;
+        $("debt-item").value = d.item || "";
         $("debt-amount").value = (d.amount / 100).toFixed(2);
         $("debt-weekly").value = d.weekly ? (d.weekly / 100).toFixed(2) : "";
         $("debt-deadline").value = d.deadline || "";
@@ -1411,16 +1504,17 @@
       }
       case "delete-debt": {
         const d = state.debts.find((x) => x.id === id);
-        askConfirm(`Delete ${d.name} and all its payments?`, "Delete").then(
-          (ok) => {
-            if (!ok) return;
-            state.debts = state.debts.filter((x) => x.id !== id);
-            state.payments = state.payments.filter((p) => p.debtId !== id);
-            if ($("debt-id").value === id) resetDebtForm();
-            saveState();
-            render();
-          }
-        );
+        askConfirm(
+          `Delete ${debtLabel(d)} and all its payments?`,
+          "Delete"
+        ).then((ok) => {
+          if (!ok) return;
+          state.debts = state.debts.filter((x) => x.id !== id);
+          state.payments = state.payments.filter((p) => p.debtId !== id);
+          if ($("debt-id").value === id) resetDebtForm();
+          saveState();
+          render();
+        });
         break;
       }
       case "delete-payment": {
@@ -1511,7 +1605,7 @@
     try {
       const data = JSON.parse(json);
       cloudJson = json;
-      state = Object.assign(emptyState(), data);
+      state = normalizeState(Object.assign(emptyState(), data));
       root.localStorage.setItem(STORAGE_KEY, json);
     } catch (e) {
       // Keep what's on screen if the stored copy can't be read.
@@ -1594,7 +1688,7 @@
           "Replace"
         ).then((ok) => {
           if (!ok) return;
-          state = Object.assign(emptyState(), data);
+          state = normalizeState(Object.assign(emptyState(), data));
           saveState();
           render();
           flash("Backup restored.");

@@ -1141,6 +1141,12 @@ Ensure the default browser behavior of the `hidden` attribute.
   margin-bottom: calc(1rem * var(--tw-space-y-reverse));
 }
 
+.space-y-3 > :not([hidden]) ~ :not([hidden]) {
+  --tw-space-y-reverse: 0;
+  margin-top: calc(0.75rem * calc(1 - var(--tw-space-y-reverse)));
+  margin-bottom: calc(0.75rem * var(--tw-space-y-reverse));
+}
+
 .overflow-hidden {
   overflow: hidden;
 }
@@ -1484,6 +1490,10 @@ Ensure the default browser behavior of the `hidden` attribute.
   padding: 2rem;
 }
 
+.p-3 {
+  padding: 0.75rem;
+}
+
 .px-4 {
   padding-left: 1rem;
   padding-right: 1rem;
@@ -1654,6 +1664,10 @@ Ensure the default browser behavior of the `hidden` attribute.
 
 .pl-\[62px\] {
   padding-left: 62px;
+}
+
+.pt-1 {
+  padding-top: 0.25rem;
 }
 
 .pr-3 {
