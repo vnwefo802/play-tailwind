@@ -1268,6 +1268,9 @@
             <span class="text-dark">${esc(e.name)}</span>
             <span class="flex items-center gap-3">
               <span class="font-medium text-dark">${fmt(e.amount)}</span>
+              <button data-action="edit-essential" data-id="${
+                e.id
+              }" class="text-xs font-medium text-body-color hover:text-dark hover:underline">Edit</button>
               <button data-action="delete-essential" data-id="${
                 e.id
               }" class="text-xs font-medium text-red-600 hover:underline">Remove</button>
@@ -1729,12 +1732,29 @@
       flash("Enter a name and a monthly amount above £0.", true);
       return;
     }
-    state.essentials.push({ id: newId(), name, amount });
+    const editing = state.essentials.find(
+      (x) => x.id === $("essential-id").value
+    );
+    if (editing) {
+      Object.assign(editing, { name, amount });
+      flash(`${name} updated.`);
+    } else {
+      state.essentials.push({ id: newId(), name, amount });
+    }
     saveState();
-    $("essential-form").reset();
+    resetEssentialForm();
     $("essential-name").focus();
     render();
   });
+
+  function resetEssentialForm() {
+    $("essential-form").reset();
+    $("essential-id").value = "";
+    $("essential-submit").textContent = "Add";
+    $("essential-cancel").classList.add("hidden");
+  }
+
+  $("essential-cancel").addEventListener("click", resetEssentialForm);
 
   $("plan-strategy").addEventListener("change", (e) => {
     state.plan.strategy = e.target.value;
@@ -1820,7 +1840,18 @@
         });
         break;
       }
+      case "edit-essential": {
+        const item = state.essentials.find((x) => x.id === id);
+        $("essential-id").value = item.id;
+        $("essential-name").value = item.name;
+        $("essential-amount").value = (item.amount / 100).toFixed(2);
+        $("essential-submit").textContent = "Save";
+        $("essential-cancel").classList.remove("hidden");
+        $("essential-name").focus();
+        break;
+      }
       case "delete-essential": {
+        if ($("essential-id").value === id) resetEssentialForm();
         state.essentials = state.essentials.filter((x) => x.id !== id);
         saveState();
         render();

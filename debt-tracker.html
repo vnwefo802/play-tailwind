@@ -575,6 +575,7 @@
                 class="mb-4 flex flex-wrap gap-2"
                 autocomplete="off"
               >
+                <input type="hidden" id="essential-id" />
                 <input
                   id="essential-name"
                   type="text"
@@ -594,10 +595,18 @@
                   class="w-32 rounded-lg border border-gray-200 px-4 py-2 text-dark outline-none focus:border-primary"
                 />
                 <button
+                  id="essential-submit"
                   type="submit"
                   class="rounded-lg bg-dark px-4 py-2 font-medium text-white hover:bg-opacity-90"
                 >
                   Add
+                </button>
+                <button
+                  id="essential-cancel"
+                  type="button"
+                  class="hidden rounded-lg border border-gray-200 px-4 py-2 font-medium text-body-color hover:text-dark"
+                >
+                  Cancel
                 </button>
               </form>
               <ul id="essential-list" class="text-sm"></ul>
