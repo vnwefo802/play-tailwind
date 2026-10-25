@@ -87,6 +87,77 @@
           ></div>
         </div>
         <p id="sum-pct" class="mt-2 text-sm text-body-color">0% paid off</p>
+
+        <div
+          id="sum-charts"
+          class="mt-6 grid hidden gap-8 border-t border-gray-100 pt-6 md:grid-cols-2"
+        >
+          <figure class="flex min-w-0 flex-col gap-4">
+            <figcaption class="text-base font-semibold text-dark">
+              Still to pay
+            </figcaption>
+            <div class="flex flex-wrap items-center justify-center gap-6">
+              <div class="relative h-48 w-48 shrink-0">
+                <svg
+                  id="chart-left"
+                  viewBox="0 0 200 200"
+                  class="h-full w-full"
+                  role="img"
+                ></svg>
+                <div
+                  class="pointer-events-none absolute inset-0 flex flex-col items-center justify-center text-center"
+                >
+                  <span class="text-xs uppercase tracking-wide text-body-color"
+                    >Still to pay</span
+                  >
+                  <span
+                    id="chart-left-amount"
+                    class="text-2xl font-bold text-dark"
+                  ></span>
+                  <span
+                    id="chart-left-pct"
+                    class="text-xs text-body-color"
+                  ></span>
+                </div>
+              </div>
+              <ul
+                id="chart-left-legend"
+                class="w-full min-w-0 space-y-2 text-sm sm:w-auto sm:flex-1"
+              ></ul>
+            </div>
+          </figure>
+          <figure class="flex min-w-0 flex-col gap-4">
+            <figcaption class="text-base font-semibold text-dark">
+              Left to pay by person
+            </figcaption>
+            <div class="flex flex-wrap items-center justify-center gap-6">
+              <div class="relative h-48 w-48 shrink-0">
+                <svg
+                  id="chart-people"
+                  viewBox="0 0 200 200"
+                  class="h-full w-full"
+                  role="img"
+                ></svg>
+                <div
+                  class="pointer-events-none absolute inset-0 flex flex-col items-center justify-center text-center"
+                >
+                  <span
+                    id="chart-people-count"
+                    class="text-2xl font-bold text-dark"
+                  ></span>
+                  <span
+                    id="chart-people-label"
+                    class="text-xs uppercase tracking-wide text-body-color"
+                  ></span>
+                </div>
+              </div>
+              <ul
+                id="chart-people-legend"
+                class="w-full min-w-0 space-y-2 text-sm sm:w-auto sm:flex-1"
+              ></ul>
+            </div>
+          </figure>
+        </div>
       </section>
       <!-- ====== Summary End -->
 

@@ -379,6 +379,35 @@
     return st;
   }
 
+  // What's left per person for the chart, in the order people were added.
+  // Each keeps a fixed colour slot (its place among everyone ever added),
+  // so paying someone off never repaints the others. Past the 7th person
+  // the rest share an "Everyone else" slice.
+  function leftByPerson(debts, payments) {
+    const slices = groupDebts(debts).map((group, slot) => ({
+      name: group.name,
+      slot,
+      left: sum(group.debts, (d) =>
+        Math.max(
+          d.amount -
+            sum(
+              payments.filter((p) => p.debtId === d.id),
+              (p) => p.amount
+            ),
+          0
+        )
+      ),
+    }));
+    const owing = slices.filter((s) => s.left > 0);
+    if (owing.length <= 8) return owing;
+    const rest = owing.slice(7);
+    return owing.slice(0, 7).concat({
+      name: `Everyone else (${rest.length})`,
+      slot: 7,
+      left: sum(rest, (s) => s.left),
+    });
+  }
+
   const calc = {
     toPence,
     paidOn,
@@ -398,6 +427,7 @@
     debtLabel,
     groupDebts,
     normalizeState,
+    leftByPerson,
     fridaysInMonth,
     fridayPlan,
     fridayForPayment,
@@ -505,6 +535,7 @@
 
   function render() {
     renderSummary();
+    renderCharts();
     renderPayday();
     renderDebts();
     renderPaymentForm();
@@ -517,6 +548,146 @@
       "hidden",
       storageWorks || Boolean(cloudDoc)
     );
+  }
+
+  // ===== Charts =====
+
+  // Fixed categorical order (validated palette); slot = person's place.
+  const SERIES = [
+    "#2a78d6",
+    "#eb6834",
+    "#1baf7a",
+    "#eda100",
+    "#e87ba4",
+    "#008300",
+    "#6250d6",
+    "#e34948",
+  ];
+  const PAID = "#13C296";
+  const TRACK = "#E5E7EB";
+  const SURFACE = "#FFFFFF";
+
+  // A ring segment from fraction f0 to f1 of the way round, clockwise from
+  // the top, between radii 62 and 90 of a 200x200 box.
+  function ringPath(f0, f1) {
+    const point = (f, r) => {
+      const a = 2 * Math.PI * f - Math.PI / 2;
+      return `${(100 + r * Math.cos(a)).toFixed(2)} ${(
+        100 +
+        r * Math.sin(a)
+      ).toFixed(2)}`;
+    };
+    const large = f1 - f0 > 0.5 ? 1 : 0;
+    return `M ${point(f0, 90)} A 90 90 0 ${large} 1 ${point(f1, 90)} L ${point(
+      f1,
+      62
+    )} A 62 62 0 ${large} 0 ${point(f0, 62)} Z`;
+  }
+
+  // Slices as [{value, color, label}]; a 2px surface gap separates them.
+  function ringSvg(slices) {
+    const total = sum(slices, (s) => s.value);
+    if (!total) return "";
+    const whole = slices.filter((s) => s.value > 0);
+    if (whole.length === 1) {
+      return `<circle cx="100" cy="100" r="76" fill="none" stroke="${
+        whole[0].color
+      }" stroke-width="28"><title>${esc(whole[0].label)}</title></circle>`;
+    }
+    let at = 0;
+    return whole
+      .map((s) => {
+        const f0 = at / total;
+        at += s.value;
+        return `<path d="${ringPath(f0, at / total)}" fill="${
+          s.color
+        }" stroke="${SURFACE}" stroke-width="2" stroke-linejoin="round"><title>${esc(
+          s.label
+        )}</title></path>`;
+      })
+      .join("");
+  }
+
+  function legendRow(color, name, amount, note) {
+    return `
+      <li class="flex items-center gap-2">
+        <span class="h-3 w-3 shrink-0 rounded-sm" style="background:${color}"></span>
+        <span class="min-w-0 flex-1 truncate text-dark">${esc(name)}</span>
+        <span class="font-semibold tabular-nums text-dark">${fmt(amount)}</span>
+        ${
+          note
+            ? `<span class="w-10 text-right text-xs tabular-nums text-body-color">${note}</span>`
+            : ""
+        }
+      </li>`;
+  }
+
+  function renderCharts() {
+    const owed = sum(state.debts, (d) => d.amount);
+    $("sum-charts").classList.toggle("hidden", owed === 0);
+    if (!owed) return;
+    const left = sum(state.debts, (d) => remainingOn(state, d));
+    const paid = owed - left;
+    const pct = (n) => `${Math.round((n / owed) * 100)}%`;
+
+    $("chart-left").innerHTML = ringSvg([
+      { value: paid, color: PAID, label: `Paid: ${fmt(paid)} (${pct(paid)})` },
+      {
+        value: left,
+        color: TRACK,
+        label: `Still to pay: ${fmt(left)} (${pct(left)})`,
+      },
+    ]);
+    $("chart-left").setAttribute(
+      "aria-label",
+      `${fmt(left)} still to pay of ${fmt(owed)}`
+    );
+    // Keep long amounts inside the ring's hole.
+    const amount = fmt(left);
+    $("chart-left-amount").textContent = amount;
+    $("chart-left-amount").className = `font-bold text-dark ${
+      amount.length <= 9
+        ? "text-2xl"
+        : amount.length <= 10
+        ? "text-xl"
+        : "text-lg"
+    }`;
+    $("chart-left-pct").textContent = `${pct(paid)} paid`;
+    $("chart-left-legend").innerHTML =
+      legendRow(PAID, "Paid", paid, pct(paid)) +
+      legendRow(TRACK, "Still to pay", left, pct(left));
+
+    const people = leftByPerson(state.debts, state.payments);
+    const share = (n) => `${Math.round((n / left) * 100)}%`;
+    $("chart-people").innerHTML = people.length
+      ? ringSvg(
+          people.map((p) => ({
+            value: p.left,
+            color: SERIES[p.slot % SERIES.length],
+            label: `${p.name}: ${fmt(p.left)} left (${share(p.left)})`,
+          }))
+        )
+      : `<circle cx="100" cy="100" r="76" fill="none" stroke="${PAID}" stroke-width="28"></circle>`;
+    $("chart-people").setAttribute(
+      "aria-label",
+      people.map((p) => `${p.name} ${fmt(p.left)}`).join(", ") ||
+        "Everything is paid off"
+    );
+    $("chart-people-count").textContent = people.length;
+    $("chart-people-label").textContent =
+      people.length === 1 ? "person left" : "people left";
+    $("chart-people-legend").innerHTML = people.length
+      ? people
+          .map((p) =>
+            legendRow(
+              SERIES[p.slot % SERIES.length],
+              p.name,
+              p.left,
+              share(p.left)
+            )
+          )
+          .join("")
+      : `<li class="text-secondary font-medium">Everything is paid off.</li>`;
   }
 
   function renderPayday() {
