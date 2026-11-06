@@ -1,0 +1,187 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta http-equiv="X-UA-Compatible" content="IE=edge" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta
+      name="description"
+      content="Claude: a side of Play Tailwind dedicated to Claude, Anthropic's AI assistant."
+    />
+    <title>Claude | Play Tailwind</title>
+    <link
+      rel="shortcut icon"
+      href="assets/images/favicon.png"
+      type="image/x-icon"
+    />
+    <link rel="stylesheet" href="assets/css/tailwind.css" />
+    <style>
+      :root {
+        --claude-bg: #faf9f5;
+        --claude-ink: #141413;
+        --claude-muted: #5e5d59;
+        --claude-accent: #d97757;
+        --claude-card: #ffffff;
+        --claude-border: #e8e6dc;
+      }
+      @media (prefers-color-scheme: dark) {
+        :root:not([data-theme="light"]) {
+          --claude-bg: #1f1e1b;
+          --claude-ink: #faf9f5;
+          --claude-muted: #b0aea5;
+          --claude-accent: #e8967a;
+          --claude-card: #2a2925;
+          --claude-border: #3d3c37;
+        }
+      }
+      :root[data-theme="dark"] {
+        --claude-bg: #1f1e1b;
+        --claude-ink: #faf9f5;
+        --claude-muted: #b0aea5;
+        --claude-accent: #e8967a;
+        --claude-card: #2a2925;
+        --claude-border: #3d3c37;
+      }
+      body {
+        background: var(--claude-bg);
+        color: var(--claude-ink);
+        font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+        margin: 0;
+        line-height: 1.6;
+      }
+      a {
+        color: var(--claude-accent);
+      }
+      .claude-nav {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 16px;
+        align-items: center;
+        justify-content: space-between;
+        padding: 20px 16px;
+        max-width: 1100px;
+        margin: 0 auto;
+      }
+      .claude-nav a {
+        color: var(--claude-ink);
+        text-decoration: none;
+        font-weight: 500;
+      }
+      .claude-nav a:hover {
+        color: var(--claude-accent);
+      }
+      .claude-wrap {
+        max-width: 1100px;
+        margin: 0 auto;
+        padding: 40px 16px 80px;
+      }
+      .claude-hero {
+        padding: 64px 0 48px;
+        max-width: 760px;
+      }
+      .claude-hero h1 {
+        font-size: clamp(2.2rem, 6vw, 3.6rem);
+        line-height: 1.1;
+        margin: 0 0 16px;
+      }
+      .claude-hero p {
+        font-size: 1.15rem;
+        color: var(--claude-muted);
+        margin: 0 0 28px;
+      }
+      .claude-btn {
+        display: inline-block;
+        background: var(--claude-accent);
+        color: #ffffff;
+        padding: 12px 22px;
+        border-radius: 8px;
+        text-decoration: none;
+        font-weight: 600;
+        margin-right: 12px;
+        margin-bottom: 12px;
+      }
+      .claude-btn.ghost {
+        background: transparent;
+        color: var(--claude-ink);
+        border: 1px solid var(--claude-border);
+      }
+      .claude-grid {
+        display: grid;
+        gap: 20px;
+        grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+        margin-top: 40px;
+      }
+      .claude-card {
+        background: var(--claude-card);
+        border: 1px solid var(--claude-border);
+        border-radius: 14px;
+        padding: 24px;
+      }
+      .claude-card h2 {
+        font-size: 1.15rem;
+        margin: 0 0 8px;
+      }
+      .claude-card p {
+        margin: 0;
+        color: var(--claude-muted);
+      }
+      .claude-footer {
+        border-top: 1px solid var(--claude-border);
+        color: var(--claude-muted);
+        font-size: 0.9rem;
+        padding: 24px 16px;
+        text-align: center;
+      }
+    </style>
+  </head>
+  <body>
+    <header>
+      <nav class="claude-nav">
+        <a href="index.html">Play Tailwind</a>
+        <div style="display: flex; gap: 20px; flex-wrap: wrap">
+          <a href="about.html">About</a>
+          <a href="pricing.html">Pricing</a>
+          <a href="contact.html">Contact</a>
+          <a href="blog-grids.html">Blog</a>
+          <a href="claude.html" aria-current="page">Claude</a>
+        </div>
+      </nav>
+    </header>
+
+    <main class="claude-wrap">
+      <section class="claude-hero">
+        <h1>Meet Claude</h1>
+        <p>
+          Claude is an AI assistant made by Anthropic. It helps people write,
+          code, analyze information, and think through hard problems. This page
+          is a dedicated corner of Play Tailwind for everything Claude.
+        </p>
+        <a class="claude-btn" href="https://claude.ai" target="_blank" rel="noopener">Try Claude</a>
+        <a class="claude-btn ghost" href="https://docs.anthropic.com" target="_blank" rel="noopener">Read the docs</a>
+      </section>
+
+      <section class="claude-grid" aria-label="What Claude can do">
+        <article class="claude-card">
+          <h2>Write and edit</h2>
+          <p>Draft emails, reports, stories, and documentation, then refine the tone and structure.</p>
+        </article>
+        <article class="claude-card">
+          <h2>Code and debug</h2>
+          <p>Explain code, write features, find bugs, and review changes across many languages.</p>
+        </article>
+        <article class="claude-card">
+          <h2>Analyze</h2>
+          <p>Summarize long documents, compare options, and reason through data step by step.</p>
+        </article>
+        <article class="claude-card">
+          <h2>Work with tools</h2>
+          <p>Use connected tools and files to carry multi-step tasks from start to finish.</p>
+        </article>
+      </section>
+    </main>
+
+    <footer class="claude-footer">
+      Claude is a product of Anthropic. This page is part of the Play Tailwind template.
+    </footer>
+  </body>
+</html>
